@@ -7,12 +7,11 @@ import type {
   Isotope3D,
   DosimeterProbe,
   ZoneBoundary3D,
+  PlumeIsoline3D,
+  MapStyleType,
 } from "./types";
-import {
-  calculateDispersionCoefficients,
-  calculatePointRadiologicalDose,
-  worldToPlumeCoordinates,
-} from "./gaussianPlume3D";
+import { calculateDispersionCoefficients, calculatePointRadiologicalDose } from "./gaussianPlume3D";
+import { createGeographicMapCanvas, loadMapTextureAsync } from "./mapTextureGenerator";
 
 interface Plume3DCanvasProps {
   source: PlumeSource3D;
@@ -21,8 +20,11 @@ interface Plume3DCanvasProps {
   probe: DosimeterProbe;
   onProbeMove: (newPos: { x: number; y: number; z: number }) => void;
   zones: ZoneBoundary3D[];
+  isolines: PlumeIsoline3D[];
   showZones: boolean;
+  showIsolines: boolean;
   showCenterline: boolean;
+  mapStyle: MapStyleType;
   particleDensity: "low" | "medium" | "high";
   cameraPreset: "perspective" | "top" | "side" | "downwind" | "source";
   onCameraPresetSettled?: () => void;
@@ -30,8 +32,6 @@ interface Plume3DCanvasProps {
 }
 
 // Pre-allocated math helpers to ensure zero GC in the render loop
-const _vec3A = new THREE.Vector3();
-const _vec3B = new THREE.Vector3();
 const _colorA = new THREE.Color();
 const _raycaster = new THREE.Raycaster();
 const _mouse = new THREE.Vector2();
@@ -43,8 +43,11 @@ export function Plume3DCanvas({
   probe,
   onProbeMove,
   zones,
+  isolines,
   showZones,
+  showIsolines,
   showCenterline,
+  mapStyle,
   particleDensity,
   cameraPreset,
   onCameraPresetSettled,
@@ -58,7 +61,12 @@ export function Plume3DCanvas({
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
 
-  // Scene dynamic objects
+  // Ground Terrain Mesh & Texture
+  const groundMeshRef = useRef<THREE.Mesh | null>(null);
+  const groundMatRef = useRef<THREE.MeshBasicMaterial | null>(null);
+  const currentTextureRef = useRef<THREE.Texture | null>(null);
+
+  // Scene dynamic visual objects
   const particlesRef = useRef<THREE.Points | null>(null);
   const particleCountRef = useRef<number>(3500);
   const particleDataRef = useRef<{
@@ -73,6 +81,7 @@ export function Plume3DCanvas({
   } | null>(null);
 
   const zonesGroupRef = useRef<THREE.Group | null>(null);
+  const isolinesGroupRef = useRef<THREE.Group | null>(null);
   const centerlineLineRef = useRef<THREE.Line | null>(null);
   const probeMeshRef = useRef<THREE.Group | null>(null);
   const windArrowGroupRef = useRef<THREE.Group | null>(null);
@@ -94,7 +103,9 @@ export function Plume3DCanvas({
     meteorology,
     isotope,
     probe,
+    mapStyle,
     showZones,
+    showIsolines,
     showCenterline,
     isSimulating,
     onProbeMove,
@@ -106,7 +117,9 @@ export function Plume3DCanvas({
       meteorology,
       isotope,
       probe,
+      mapStyle,
       showZones,
+      showIsolines,
       showCenterline,
       isSimulating,
       onProbeMove,
@@ -117,14 +130,16 @@ export function Plume3DCanvas({
     meteorology,
     isotope,
     probe,
+    mapStyle,
     showZones,
+    showIsolines,
     showCenterline,
     isSimulating,
     onProbeMove,
     onCameraPresetSettled,
   ]);
 
-  // Handle camera presets
+  // Handle camera presets with strict metric alignment
   const applyCameraPreset = useCallback(
     (preset: "perspective" | "top" | "side" | "downwind" | "source") => {
       const windAngleRad = (((meteorology.windDirectionDeg + 180) % 360) * Math.PI) / 180;
@@ -136,28 +151,29 @@ export function Plume3DCanvas({
 
       switch (preset) {
         case "top":
-          targetPos = new THREE.Vector3(dwX * 800, 2200, dwZ * 800 + 0.1);
+          // Orthogonal-like bird's-eye view aligned with North (-Z)
+          targetPos = new THREE.Vector3(dwX * 800, 2400, dwZ * 800 + 0.1);
           targetLookAt = new THREE.Vector3(dwX * 800, 0, dwZ * 800);
           break;
         case "side":
-          // Crosswind side perspective
-          targetPos = new THREE.Vector3(-dwZ * 1400 + dwX * 600, 400, dwX * 1400 + dwZ * 600);
-          targetLookAt = new THREE.Vector3(dwX * 600, 60, dwZ * 600);
+          // Crosswind side perspective along dispersion cone
+          targetPos = new THREE.Vector3(-dwZ * 1400 + dwX * 600, 380, dwX * 1400 + dwZ * 600);
+          targetLookAt = new THREE.Vector3(dwX * 600, 50, dwZ * 600);
           break;
         case "downwind":
-          // Standing downwind looking back up at source
-          targetPos = new THREE.Vector3(dwX * 1800, 150, dwZ * 1800);
+          // Standing downwind looking back up at source stack
+          targetPos = new THREE.Vector3(dwX * 1800, 140, dwZ * 1800);
           targetLookAt = new THREE.Vector3(0, source.effectiveHeight, 0);
           break;
         case "source":
-          // Close-up at release stack
-          targetPos = new THREE.Vector3(-150, 120, -150);
+          // Close-up at release stack / reactor building
+          targetPos = new THREE.Vector3(-140, 110, -140);
           targetLookAt = new THREE.Vector3(0, source.effectiveHeight * 0.7, 0);
           break;
         case "perspective":
         default:
-          targetPos = new THREE.Vector3(-dwZ * 900 - dwX * 200, 450, dwX * 900 - dwZ * 200);
-          targetLookAt = new THREE.Vector3(dwX * 500, 50, dwZ * 500);
+          targetPos = new THREE.Vector3(-dwZ * 950 - dwX * 200, 480, dwX * 950 - dwZ * 200);
+          targetLookAt = new THREE.Vector3(dwX * 550, 50, dwZ * 550);
           break;
       }
 
@@ -174,7 +190,7 @@ export function Plume3DCanvas({
     applyCameraPreset(cameraPreset);
   }, [cameraPreset, applyCameraPreset]);
 
-  // Main Scene Initialization
+  // Main Scene & Renderer Initialization
   useEffect(() => {
     const container = mountRef.current;
     if (!container) return;
@@ -212,41 +228,40 @@ export function Plume3DCanvas({
     // 2. Scene & Horizon Fog
     const scene = new THREE.Scene();
     scene.background = new THREE.Color("#080c12");
-    scene.fog = new THREE.FogExp2("#080c12", 0.00035);
+    scene.fog = new THREE.FogExp2("#080c12", 0.0003);
     sceneRef.current = scene;
 
-    // 3. Camera & Controls
-    const camera = new THREE.PerspectiveCamera(45, width / height, 5, 25000);
-    camera.position.set(600, 400, 800);
+    // 3. Camera & OrbitControls
+    const camera = new THREE.PerspectiveCamera(45, width / height, 5, 30000);
+    camera.position.set(650, 420, 850);
     cameraRef.current = camera;
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = !isSoftwareGl;
-    controls.dampingFactor = 0.05;
-    controls.maxPolarAngle = Math.PI / 2 - 0.02; // Prevent going beneath ground
-    controls.minDistance = 30;
-    controls.maxDistance = 8000;
+    controls.dampingFactor = 0.06;
+    controls.maxPolarAngle = Math.PI / 2 - 0.02; // Prevent going beneath terrain
+    controls.minDistance = 20;
+    controls.maxDistance = 12000;
     controlsRef.current = controls;
 
-    // Cancel scripted camera transitions when user starts interacting
     controls.addEventListener("start", () => {
       cameraTargetRef.current.active = false;
     });
 
-    // 4. Lighting Rig (Warm Key Light + Cool Hemisphere Fill)
-    const hemiLight = new THREE.HemisphereLight("#93c5fd", "#0f172a", 0.7);
+    // 4. Lighting Rig (Key Light + Cool Sky Fill)
+    const hemiLight = new THREE.HemisphereLight("#93c5fd", "#0f172a", 0.75);
     hemiLight.position.set(0, 1000, 0);
     scene.add(hemiLight);
 
-    const dirLight = new THREE.DirectionalLight("#fef08a", 1.2);
-    dirLight.position.set(600, 1200, 800);
+    const dirLight = new THREE.DirectionalLight("#fef08a", 1.25);
+    dirLight.position.set(800, 1500, 900);
     dirLight.castShadow = !isSoftwareGl;
     if (dirLight.shadow) {
       dirLight.shadow.mapSize.width = 1024;
       dirLight.shadow.mapSize.height = 1024;
       dirLight.shadow.camera.near = 100;
-      dirLight.shadow.camera.far = 4000;
-      const d = 1000;
+      dirLight.shadow.camera.far = 5000;
+      const d = 1400;
       dirLight.shadow.camera.left = -d;
       dirLight.shadow.camera.right = d;
       dirLight.shadow.camera.top = d;
@@ -255,51 +270,49 @@ export function Plume3DCanvas({
     }
     scene.add(dirLight);
 
-    // Subtle blue accent back light
-    const backLight = new THREE.DirectionalLight("#38bdf8", 0.6);
-    backLight.position.set(-800, 600, -800);
+    const backLight = new THREE.DirectionalLight("#38bdf8", 0.55);
+    backLight.position.set(-900, 700, -900);
     scene.add(backLight);
 
-    // 5. High-Tech Ground Terrain & Grid System
+    // 5. Embedded Realistic Geographic Map Terrain (12km x 12km)
     const groundSize = 12000;
+    const initialTexture = loadMapTextureAsync(
+      propsRef.current.mapStyle,
+      propsRef.current.source.latitude ?? 40.212,
+      propsRef.current.source.longitude ?? 68.865,
+      groundSize,
+      undefined,
+      (tex) => {
+        if (groundMatRef.current) {
+          groundMatRef.current.map = tex;
+          groundMatRef.current.needsUpdate = true;
+        }
+      },
+    );
+    currentTextureRef.current = initialTexture;
+
     const groundGeo = new THREE.PlaneGeometry(groundSize, groundSize, 4, 4);
-    const groundMat = new THREE.MeshStandardMaterial({
-      color: "#0a0f18",
-      roughness: 0.9,
-      metalness: 0.1,
+    const groundMat = new THREE.MeshBasicMaterial({
+      map: initialTexture,
+      side: THREE.DoubleSide,
+      fog: false, // Ensures ground texture is always 100% visible, luminous, and independent of distance fog / nighttime scene illumination
+      depthWrite: true,
     });
+    groundMatRef.current = groundMat;
+
     const groundMesh = new THREE.Mesh(groundGeo, groundMat);
+    groundMesh.position.set(0, -0.05, 0); // Position at y = -0.05 so isolines and zones at y = 0.5 never z-fight
     groundMesh.rotation.x = -Math.PI / 2;
-    groundMesh.receiveShadow = !isSoftwareGl;
+    groundMesh.receiveShadow = false;
     scene.add(groundMesh);
+    groundMeshRef.current = groundMesh;
 
-    // Radar coordinate grid
-    const gridHelper = new THREE.GridHelper(groundSize, 120, "#1e293b", "#0f172a");
-    gridHelper.position.y = 0.2;
-    scene.add(gridHelper);
-
-    // Range rings (500m, 1km, 2km, 5km)
-    const rangeDistances = [500, 1000, 2000, 5000];
-    rangeDistances.forEach((r) => {
-      const ringGeo = new THREE.RingGeometry(r - 3, r + 3, 128);
-      const ringMat = new THREE.MeshBasicMaterial({
-        color: "#334155",
-        side: THREE.DoubleSide,
-        transparent: true,
-        opacity: 0.35,
-      });
-      const ringMesh = new THREE.Mesh(ringGeo, ringMat);
-      ringMesh.rotation.x = -Math.PI / 2;
-      ringMesh.position.y = 0.3;
-      scene.add(ringMesh);
-    });
-
-    // 6. Procedural Composite Industrial Reactor / Stack Facility (3-12 parts)
+    // 6. Procedural Composite Industrial Facility (Release Stack & Reactor)
     const facilityGroup = new THREE.Group();
     facilityGroup.position.set(source.position.x, 0, source.position.z);
 
-    // Part 1: Heavy Reinforced Concrete Base Foundation
-    const baseGeo = new THREE.BoxGeometry(60, 6, 60);
+    // Reinforced Concrete Foundation Pad
+    const baseGeo = new THREE.BoxGeometry(64, 6, 64);
     const baseMat = new THREE.MeshStandardMaterial({
       color: "#334155",
       roughness: 0.85,
@@ -311,15 +324,15 @@ export function Plume3DCanvas({
     baseMesh.receiveShadow = !isSoftwareGl;
     facilityGroup.add(baseMesh);
 
-    // Part 2: Reactor Reactor Dome / Auxiliary Building
-    const buildingGeo = new THREE.BoxGeometry(38, 22, 38);
+    // Reactor Containment Structure
+    const buildingGeo = new THREE.BoxGeometry(38, 24, 38);
     const buildingMat = new THREE.MeshStandardMaterial({
       color: "#475569",
       roughness: 0.7,
       metalness: 0.3,
     });
     const buildingMesh = new THREE.Mesh(buildingGeo, buildingMat);
-    buildingMesh.position.set(-10, 14, -10);
+    buildingMesh.position.set(-10, 15, -10);
     buildingMesh.castShadow = !isSoftwareGl;
     facilityGroup.add(buildingMesh);
 
@@ -330,11 +343,11 @@ export function Plume3DCanvas({
       metalness: 0.4,
     });
     const domeMesh = new THREE.Mesh(domeGeo, domeMat);
-    domeMesh.position.set(-10, 25, -10);
+    domeMesh.position.set(-10, 27, -10);
     domeMesh.castShadow = !isSoftwareGl;
     facilityGroup.add(domeMesh);
 
-    // Part 3: Ventilation Stack (Emission Chimney)
+    // Ventilation Chimney Stack
     const stackHeight = Math.max(25, source.effectiveHeight);
     const stackGeo = new THREE.CylinderGeometry(3.5, 5.5, stackHeight, 24);
     const stackMat = new THREE.MeshStandardMaterial({
@@ -347,7 +360,7 @@ export function Plume3DCanvas({
     stackMesh.castShadow = !isSoftwareGl;
     facilityGroup.add(stackMesh);
 
-    // Part 4 & 5: Red Warning Bands on Chimney
+    // Aviation Red Warning Bands
     const bandHeight = stackHeight * 0.12;
     const bandGeo = new THREE.CylinderGeometry(3.6, 3.8, bandHeight, 24);
     const bandMat = new THREE.MeshStandardMaterial({
@@ -363,14 +376,14 @@ export function Plume3DCanvas({
     bandMesh2.position.set(12, stackHeight * 0.45 + 3, 12);
     facilityGroup.add(bandMesh2);
 
-    // Part 6: Flashing Aviation Beacon Atop Chimney
+    // Flashing Hazard Beacon
     const beaconGeo = new THREE.SphereGeometry(1.5, 12, 12);
     const beaconMat = new THREE.MeshBasicMaterial({ color: "#ff2222" });
     const beaconMesh = new THREE.Mesh(beaconGeo, beaconMat);
     beaconMesh.position.set(12, stackHeight + 4, 12);
     facilityGroup.add(beaconMesh);
 
-    // Part 7: Ground Contact Shadow Plane
+    // Contact Shadow Plane
     const contactGeo = new THREE.PlaneGeometry(90, 90);
     const contactCanvas = document.createElement("canvas");
     contactCanvas.width = 128;
@@ -409,14 +422,12 @@ export function Plume3DCanvas({
     const vertOffsets = new Float32Array(count);
     const speeds = new Float32Array(count);
 
-    // Initialize particles along initial plume trajectory
     for (let i = 0; i < count; i++) {
-      lifeTimes[i] = 12 + Math.random() * 20; // 12-32 seconds travel life
-      ages[i] = Math.random() * lifeTimes[i]; // Stagger initial ages
-      // Normalized Gaussian offsets (-3 to +3 standard deviations)
+      lifeTimes[i] = 12 + Math.random() * 20;
+      ages[i] = Math.random() * lifeTimes[i];
       latOffsets[i] = (Math.random() + Math.random() + Math.random() + Math.random() - 2) * 1.5;
       vertOffsets[i] = (Math.random() + Math.random() + Math.random() + Math.random() - 2) * 1.5;
-      speeds[i] = 0.85 + Math.random() * 0.3; // Local wind speed turbulence
+      speeds[i] = 0.85 + Math.random() * 0.3;
     }
 
     particleDataRef.current = {
@@ -463,10 +474,14 @@ export function Plume3DCanvas({
     scene.add(particles);
     particlesRef.current = particles;
 
-    // 8. Protective Zones Visual Group
+    // 8. Protective Zones & Isolines Visual Groups
     const zonesGroup = new THREE.Group();
     scene.add(zonesGroup);
     zonesGroupRef.current = zonesGroup;
+
+    const isolinesGroup = new THREE.Group();
+    scene.add(isolinesGroup);
+    isolinesGroupRef.current = isolinesGroup;
 
     // 9. Centerline Visual Trajectory Line
     const centerlineGeo = new THREE.BufferGeometry();
@@ -548,9 +563,9 @@ export function Plume3DCanvas({
     scene.add(probeGroup);
     probeMeshRef.current = probeGroup;
 
-    // Interactive pointer drag / click placement for the sensor probe
+    // Interactive pointer placement for the sensor probe (Shift + Click on terrain)
     const onPointerDown = (event: MouseEvent) => {
-      if (event.button !== 0 || !event.shiftKey) return; // Shift + Click to place probe
+      if (event.button !== 0 || !event.shiftKey) return;
       const rect = renderer.domElement.getBoundingClientRect();
       _mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       _mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -590,6 +605,7 @@ export function Plume3DCanvas({
         isotope: iso,
         probe: curProbe,
         showZones: sz,
+        showIsolines: si,
         showCenterline: sc,
         isSimulating: simActive,
       } = propsRef.current;
@@ -620,12 +636,11 @@ export function Plume3DCanvas({
         probeMeshRef.current.position.set(curProbe.x, 0, curProbe.y);
       }
 
-      // Update Protective Zones
-      if (zonesGroupRef.current) {
-        zonesGroupRef.current.visible = sz;
-      }
+      // Visibility toggles
+      if (zonesGroupRef.current) zonesGroupRef.current.visible = sz;
+      if (isolinesGroupRef.current) isolinesGroupRef.current.visible = si;
 
-      // Update Centerline Trajectory Line
+      // Centerline trajectory line
       if (centerlineLineRef.current) {
         centerlineLineRef.current.visible = sc;
         const windTravelRad = (((met.windDirectionDeg + 180) % 360) * Math.PI) / 180;
@@ -638,7 +653,7 @@ export function Plume3DCanvas({
         centerlineLineRef.current.geometry.setFromPoints(pts);
       }
 
-      // Update Atmospheric Gaussian Plume Particle System
+      // Atmospheric Gaussian Plume Particle System
       if (particlesRef.current && particleDataRef.current) {
         const pData = particleDataRef.current;
         const pCount = particleCountRef.current;
@@ -664,7 +679,6 @@ export function Plume3DCanvas({
             pData.ages[i] += dt * pData.speeds[i];
           }
 
-          // Recycle particle when lifetime reached
           if (pData.ages[i] >= pData.lifeTimes[i]) {
             pData.ages[i] = 0;
             pData.lifeTimes[i] = 12 + Math.random() * 20;
@@ -676,30 +690,24 @@ export function Plume3DCanvas({
           }
 
           const age = pData.ages[i];
-          // Downwind travel distance x = u * age * scaleFactor
-          // For visualization scale, 1 unit = 1 meter
-          const xDownwind = u * age * 18; // scaled for visible dynamic transit
+          const xDownwind = u * age * 18;
 
           const { sigmaY, sigmaZ } = calculateDispersionCoefficients(xDownwind, met.stabilityClass);
 
-          // Crosswind and vertical Gaussian spread
           const yCrosswind = pData.latOffsets[i] * sigmaY;
-          // Vertical elevation with ground bounce (z >= 0)
           let zElev = effH + pData.vertOffsets[i] * sigmaZ;
-          if (zElev < 1.0) zElev = Math.abs(zElev) + 1.0; // Ground reflection
+          if (zElev < 1.0) zElev = Math.abs(zElev) + 1.0;
           if (met.mixingHeight > 0 && zElev > met.mixingHeight) {
-            zElev = met.mixingHeight - Math.abs(zElev - met.mixingHeight); // Inversion lid reflection
+            zElev = met.mixingHeight - Math.abs(zElev - met.mixingHeight);
           }
 
-          // World coordinates
           const wx = stackX + unitDwX * xDownwind + unitCwX * yCrosswind;
           const wy = Math.max(0.5, zElev);
           const wz = stackZ + unitDwZ * xDownwind + unitCwZ * yCrosswind;
 
           posAttr.setXYZ(i, wx, wy, wz);
 
-          // Physical Radiological Hazard Color Ramp:
-          // Centerline dose rate determines color
+          // Radiological hazard color ramp based on total dose rate / H*(10)
           const ptDose = calculatePointRadiologicalDose(
             xDownwind,
             yCrosswind,
@@ -710,11 +718,6 @@ export function Plume3DCanvas({
             1.0,
           );
 
-          // Hazard color map:
-          // > 10 mSv/h: Red/Magenta
-          // 1 - 10 mSv/h: Orange
-          // 0.1 - 1 mSv/h: Yellow
-          // < 0.1 mSv/h: Cyan/Green
           const dose = ptDose.totalDoseRate;
           if (dose > 20) {
             _colorA.setRGB(1.0, 0.05, 0.2); // Core hazard magenta-red
@@ -730,7 +733,6 @@ export function Plume3DCanvas({
 
           colAttr.setXYZ(i, _colorA.r, _colorA.g, _colorA.b);
 
-          // Dynamic particle size expands as cloud disperses downwind
           const pSize = Math.min(180, 25 + (xDownwind / 3000) * 110);
           sizeAttr.setX(i, pSize);
         }
@@ -757,12 +759,41 @@ export function Plume3DCanvas({
     };
   }, [source.position.x, source.position.z, source.effectiveHeight, particleDensity]);
 
-  // Update Protective Action Zones geometries when zones or wind direction change
+  // Update Geographic Map Texture when mapStyle or source coordinates change
+  useEffect(() => {
+    if (!groundMatRef.current) return;
+    const newTexture = loadMapTextureAsync(
+      mapStyle,
+      source.latitude ?? 40.212,
+      source.longitude ?? 68.865,
+      12000,
+      undefined,
+      (loadedTex) => {
+        if (!groundMatRef.current) return;
+        if (currentTextureRef.current && currentTextureRef.current !== loadedTex) {
+          currentTextureRef.current.dispose();
+        }
+        currentTextureRef.current = loadedTex;
+        groundMatRef.current.map = loadedTex;
+        groundMatRef.current.needsUpdate = true;
+      },
+      (err) => {
+        console.warn("Map texture update error handled with fallback:", err);
+      },
+    );
+    if (currentTextureRef.current && currentTextureRef.current !== newTexture) {
+      currentTextureRef.current.dispose();
+    }
+    currentTextureRef.current = newTexture;
+    groundMatRef.current.map = newTexture;
+    groundMatRef.current.needsUpdate = true;
+  }, [mapStyle, source.latitude, source.longitude]);
+
+  // Update Protective Action Zones geometries on ground map
   useEffect(() => {
     const group = zonesGroupRef.current;
     if (!group) return;
 
-    // Clear old zone meshes
     while (group.children.length > 0) {
       const child = group.children[0]!;
       group.remove(child);
@@ -773,7 +804,7 @@ export function Plume3DCanvas({
 
     zones.forEach((zone) => {
       const r = Math.max(50, zone.radiusMeters);
-      const ringGeo = new THREE.RingGeometry(r - 4, r + 4, 128);
+      const ringGeo = new THREE.RingGeometry(r - 5, r + 5, 128);
       const ringMat = new THREE.MeshBasicMaterial({
         color: zone.colorHex,
         side: THREE.DoubleSide,
@@ -786,6 +817,36 @@ export function Plume3DCanvas({
       group.add(ringMesh);
     });
   }, [zones, showZones]);
+
+  // Update H*(10) Ground Dose Isolines
+  useEffect(() => {
+    const group = isolinesGroupRef.current;
+    if (!group) return;
+
+    while (group.children.length > 0) {
+      const child = group.children[0]!;
+      group.remove(child);
+      if ("geometry" in child) (child as { geometry: THREE.BufferGeometry }).geometry.dispose();
+    }
+
+    if (!showIsolines || isolines.length === 0) return;
+
+    isolines.forEach((iso) => {
+      const pts = iso.points.map((p) => new THREE.Vector3(p.x, 0.45, p.z));
+      if (pts.length > 2) {
+        pts.push(pts[0]!.clone()); // Close loop
+        const lineGeo = new THREE.BufferGeometry().setFromPoints(pts);
+        const lineMat = new THREE.LineBasicMaterial({
+          color: iso.colorHex,
+          linewidth: 2,
+          transparent: true,
+          opacity: 0.85,
+        });
+        const line = new THREE.Line(lineGeo, lineMat);
+        group.add(line);
+      }
+    });
+  }, [isolines, showIsolines]);
 
   return (
     <div className="relative w-full h-full overflow-hidden select-none">

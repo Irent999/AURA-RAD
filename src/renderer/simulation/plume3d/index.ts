@@ -7,5 +7,6 @@ export * from "./types";
 export * from "./isotopes";
 export * from "./gaussianPlume3D";
 export * from "./ipcBridge";
+export * from "./mapTextureGenerator";
 export * from "./Plume3DCanvas";
 export * from "./Plume3DView";
