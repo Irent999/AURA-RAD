@@ -1,10 +1,9 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo } from "react";
 import {
   Wind,
   Activity,
   Compass,
-  Layers,
-  Camera,
+  Map as MapIcon,
   Play,
   Pause,
   RotateCcw,
@@ -13,11 +12,10 @@ import {
   MapPin,
   ChevronUp,
   ChevronDown,
-  Info,
-  Sliders,
   Flame,
   Radio,
-  Download,
+  Layers,
+  Sparkles,
 } from "lucide-react";
 import { Plume3DCanvas } from "./Plume3DCanvas";
 import { EXTENDED_ISOTOPE_LIBRARY, getExtendedIsotope } from "./isotopes";
@@ -27,7 +25,13 @@ import {
   calculateAccumulatedDoseMsv,
   worldToPlumeCoordinates,
 } from "./gaussianPlume3D";
-import type { PlumeSource3D, Meteorology3D, StabilityClass, DosimeterProbe } from "./types";
+import type {
+  PlumeSource3D,
+  Meteorology3D,
+  StabilityClass,
+  DosimeterProbe,
+  MapStyleType,
+} from "./types";
 
 export function Plume3DView() {
   // 1. Simulation Input State
@@ -35,6 +39,8 @@ export function Plume3DView() {
   const [activityExponent, setActivityExponent] = useState<number>(14); // 10^14 Bq = 100 TBq
   const [releaseDurationHours, setReleaseDurationHours] = useState<number>(1.0);
   const [releaseHeight, setReleaseHeight] = useState<number>(45); // meters
+  const [siteLat, setSiteLat] = useState<number>(40.212);
+  const [siteLon, setSiteLon] = useState<number>(68.865);
 
   const [windSpeed, setWindSpeed] = useState<number>(5.5); // m/s
   const [windDirection, setWindDirection] = useState<number>(90); // deg (East)
@@ -53,9 +59,11 @@ export function Plume3DView() {
     z: 1.5,
   });
 
-  // 3. Visual Controls & Camera
+  // 3. Visual Controls, Map & Camera
+  const [mapStyle, setMapStyle] = useState<MapStyleType>("satellite");
   const [isSimulating, setIsSimulating] = useState<boolean>(true);
   const [showZones, setShowZones] = useState<boolean>(true);
+  const [showIsolines, setShowIsolines] = useState<boolean>(true);
   const [showCenterline, setShowCenterline] = useState<boolean>(true);
   const [particleDensity, setParticleDensity] = useState<"low" | "medium" | "high">("medium");
   const [cameraPreset, setCameraPreset] = useState<
@@ -64,7 +72,9 @@ export function Plume3DView() {
 
   // Dock UI Collapsible State
   const [isDockOpen, setIsDockOpen] = useState<boolean>(true);
-  const [activeTab, setActiveTab] = useState<"source" | "meteo" | "probe" | "zones">("source");
+  const [activeTab, setActiveTab] = useState<"source" | "meteo" | "map" | "zones" | "probe">(
+    "source",
+  );
 
   // 4. Derived Physical Model Data
   const currentIsotope = useMemo(() => {
@@ -78,8 +88,17 @@ export function Plume3DView() {
       releaseDuration: releaseDurationHours * 3600,
       position: { x: 0, y: 0, z: 0 },
       effectiveHeight: releaseHeight,
+      latitude: siteLat,
+      longitude: siteLon,
     };
-  }, [selectedIsotopeSymbol, activityExponent, releaseDurationHours, releaseHeight]);
+  }, [
+    selectedIsotopeSymbol,
+    activityExponent,
+    releaseDurationHours,
+    releaseHeight,
+    siteLat,
+    siteLon,
+  ]);
 
   const meteoData: Meteorology3D = useMemo(() => {
     return {
@@ -96,7 +115,7 @@ export function Plume3DView() {
     return runGaussianPlume3DModel(sourceData, meteoData, currentIsotope);
   }, [sourceData, meteoData, currentIsotope]);
 
-  // Dosimeter Sensor Live Readout
+  // Dosimeter Sensor Live Readout with H*(10)
   const probeReading = useMemo(() => {
     const { xDownwind, yCrosswind, zHeight } = worldToPlumeCoordinates(
       probePos.x,
@@ -120,6 +139,16 @@ export function Plume3DView() {
   const probeAccumulated4h = useMemo(() => {
     return calculateAccumulatedDoseMsv(probeReading.totalDoseRate, 4, currentIsotope.decayConstant);
   }, [probeReading.totalDoseRate, currentIsotope.decayConstant]);
+
+  // GPS coordinates of the probe
+  const probeGps = useMemo(() => {
+    const lat = siteLat - probePos.y / 111139;
+    const lon = siteLon + probePos.x / (111139 * Math.cos((siteLat * Math.PI) / 180));
+    return {
+      latStr: `${lat.toFixed(4)}° N`,
+      lonStr: `${lon.toFixed(4)}° E`,
+    };
+  }, [siteLat, siteLon, probePos.x, probePos.y]);
 
   const handleReset = () => {
     setWindSpeed(5.0);
@@ -163,8 +192,11 @@ export function Plume3DView() {
           probe={probePos}
           onProbeMove={(newPos) => setProbePos((prev) => ({ ...prev, ...newPos }))}
           zones={modelOutput.zones}
+          isolines={modelOutput.isolines}
           showZones={showZones}
+          showIsolines={showIsolines}
           showCenterline={showCenterline}
+          mapStyle={mapStyle}
           particleDensity={particleDensity}
           cameraPreset={cameraPreset}
           isSimulating={isSimulating}
@@ -172,7 +204,7 @@ export function Plume3DView() {
       </div>
 
       {/* Top Header & HUD Status Bar */}
-      <div className="relative z-10 flex items-center justify-between px-6 py-3 bg-[#0f172a]/85 border-b border-[#334155]/60">
+      <div className="relative z-10 flex items-center justify-between px-6 py-3 bg-[#0f172a]/85 border-b border-[#334155]/60 backdrop-blur-none">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-400">
             <Flame className="w-5 h-5" />
@@ -183,7 +215,7 @@ export function Plume3DView() {
                 3D Атмосферный шлейф
               </span>
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-950/80 text-cyan-300 border border-cyan-700/40">
-                Гауссова модель 3D · Three.js
+                Гауссова модель · Геопривязка 1:1
               </span>
             </div>
             <div className="text-xs text-slate-400 flex items-center gap-3">
@@ -209,12 +241,12 @@ export function Plume3DView() {
           </div>
         </div>
 
-        {/* Live Peak Ground Metrics Indicator (Static typography, no pulsating dots) */}
+        {/* Live Peak Ground Metrics & H*(10) Indicator */}
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-3 px-3 py-1.5 rounded-lg bg-[#1e293b]/70 border border-[#334155]">
             <div className="text-right">
               <div className="text-[10px] text-slate-400 uppercase tracking-wider">
-                Макс. приземная доза
+                Пик H*(10) на грунте
               </div>
               <div className="text-sm font-mono font-bold text-rose-400">
                 {modelOutput.peakGroundDoseRateMsvH >= 1000
@@ -256,34 +288,41 @@ export function Plume3DView() {
       </div>
 
       {/* Floating 3D Dosimeter Sensor Readout (Top-Left, non-blocking) */}
-      <div className="absolute top-16 left-6 z-10 w-80 p-3.5 rounded-xl bg-[#0f172a]/90 border border-cyan-500/30 shadow-2xl">
+      <div className="absolute top-16 left-6 z-10 w-84 p-3.5 rounded-xl bg-[#0f172a]/92 border border-cyan-500/30 shadow-2xl">
         <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-700">
           <div className="flex items-center gap-2">
             <Radio className="w-4 h-4 text-amber-400" />
-            <span className="text-xs font-semibold text-white">Дозиметрический зонд в 3D</span>
+            <span className="text-xs font-semibold text-white">Дозиметрический зонд H*(10)</span>
           </div>
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono">
-            Shift + Клик по грунту
+            Shift + Клик по карте
           </span>
         </div>
 
         <div className="space-y-2 text-xs">
-          <div className="grid grid-cols-3 gap-1 font-mono text-[11px] bg-slate-900/80 p-1.5 rounded border border-slate-800">
+          <div className="grid grid-cols-2 gap-1.5 font-mono text-[11px] bg-slate-900/80 p-1.5 rounded border border-slate-800">
             <div>
-              X: <span className="text-cyan-300">{probePos.x.toFixed(0)} м</span>
+              Метры:{" "}
+              <span className="text-cyan-300">
+                X={probePos.x.toFixed(0)} Y={probePos.y.toFixed(0)}
+              </span>
             </div>
             <div>
-              Y: <span className="text-cyan-300">{probePos.y.toFixed(0)} м</span>
-            </div>
-            <div>
-              Z: <span className="text-cyan-300">{probePos.z.toFixed(1)} м</span>
+              GPS: <span className="text-cyan-300">{probeGps.latStr}</span>
             </div>
           </div>
 
           <div className="flex items-center justify-between">
-            <span className="text-slate-400">Мощность дозы H_dot:</span>
+            <span className="text-slate-400">Мощность H*(10):</span>
             <span className="font-mono font-bold text-sm text-rose-400">
-              {probeReading.totalDoseRate.toFixed(3)} мЗв/ч
+              {probeReading.ambientDoseEquivalentRateH10.toFixed(3)} мЗв/ч
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <span className="text-slate-400">Ингаляционная доза:</span>
+            <span className="font-mono text-amber-300">
+              {probeReading.inhalationDoseRate.toFixed(3)} мЗв/ч
             </span>
           </div>
 
@@ -302,7 +341,7 @@ export function Plume3DView() {
           <div className="pt-1.5 mt-1 border-t border-slate-800 flex items-center justify-between">
             <div className="flex items-center gap-1.5 text-slate-300">
               <Clock className="w-3.5 h-3.5 text-cyan-400" />
-              <span>Время безопасного пребывания:</span>
+              <span>Безопасное время t_max:</span>
             </div>
             <span
               className={`font-mono font-bold ${
@@ -315,33 +354,66 @@ export function Plume3DView() {
         </div>
       </div>
 
-      {/* Camera Presets Toolbar (Top-Right) */}
-      <div className="absolute top-16 right-6 z-10 flex flex-col gap-1.5 bg-[#0f172a]/85 p-1.5 rounded-xl border border-slate-700/80 shadow-lg">
-        <span className="text-[10px] px-2 py-0.5 text-slate-400 font-medium uppercase tracking-wider">
-          Ракурс камеры
-        </span>
-        <div className="flex gap-1">
-          {(
-            [
-              { id: "perspective", label: "3D Обзор" },
-              { id: "top", label: "План (Сверху)" },
-              { id: "downwind", label: "По ветру" },
-              { id: "side", label: "Профиль (Сбоку)" },
-              { id: "source", label: "Эпицентр" },
-            ] as const
-          ).map((item) => (
-            <button
-              key={item.id}
-              onClick={() => setCameraPreset(item.id)}
-              className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
-                cameraPreset === item.id
-                  ? "bg-cyan-600 text-white font-medium"
-                  : "bg-slate-800 text-slate-300 hover:bg-slate-700"
-              }`}
-            >
-              {item.label}
-            </button>
-          ))}
+      {/* Camera Presets & Map Style Quick Selector (Top-Right) */}
+      <div className="absolute top-16 right-6 z-10 flex flex-col gap-2">
+        {/* Camera Views */}
+        <div className="flex flex-col gap-1.5 bg-[#0f172a]/88 p-1.5 rounded-xl border border-slate-700/80 shadow-lg">
+          <span className="text-[10px] px-2 py-0.5 text-slate-400 font-medium uppercase tracking-wider">
+            Ракурс камеры
+          </span>
+          <div className="flex gap-1">
+            {(
+              [
+                { id: "perspective", label: "3D Обзор" },
+                { id: "top", label: "План (Сверху)" },
+                { id: "downwind", label: "По ветру" },
+                { id: "side", label: "Профиль (Сбоку)" },
+                { id: "source", label: "Эпицентр" },
+              ] as const
+            ).map((item) => (
+              <button
+                key={item.id}
+                onClick={() => setCameraPreset(item.id)}
+                className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                  cameraPreset === item.id
+                    ? "bg-cyan-600 text-white font-medium"
+                    : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                }`}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Map Style Quick Pills */}
+        <div className="flex flex-col gap-1.5 bg-[#0f172a]/88 p-1.5 rounded-xl border border-slate-700/80 shadow-lg">
+          <span className="text-[10px] px-2 py-0.5 text-slate-400 font-medium uppercase tracking-wider flex items-center gap-1.5">
+            <MapIcon className="w-3 h-3 text-cyan-400" />
+            Подложка карты
+          </span>
+          <div className="flex gap-1">
+            {(
+              [
+                { id: "satellite", label: "Спутник" },
+                { id: "topographic", label: "Топокарта" },
+                { id: "tactical", label: "Тактическая" },
+                { id: "osm", label: "OpenStreetMap" },
+              ] as const
+            ).map((style) => (
+              <button
+                key={style.id}
+                onClick={() => setMapStyle(style.id)}
+                className={`px-2 py-1 text-xs rounded-md transition-colors ${
+                  mapStyle === style.id
+                    ? "bg-emerald-600 text-white font-medium"
+                    : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                }`}
+              >
+                {style.label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -360,7 +432,7 @@ export function Plume3DView() {
           ) : (
             <>
               <ChevronUp className="w-3.5 h-3.5 text-cyan-400" />
-              <span>Развернуть параметры моделирования</span>
+              <span>Развернуть параметры моделирования и карты</span>
             </>
           )}
         </button>
@@ -390,7 +462,18 @@ export function Plume3DView() {
                 }`}
               >
                 <Wind className="w-3.5 h-3.5" />
-                <span>Метеоусловия и Ветер</span>
+                <span>Метеоусловия</span>
+              </button>
+              <button
+                onClick={() => setActiveTab("map")}
+                className={`flex items-center gap-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-colors ${
+                  activeTab === "map"
+                    ? "border-cyan-400 text-cyan-400"
+                    : "border-transparent text-slate-400 hover:text-white"
+                }`}
+              >
+                <MapIcon className="w-3.5 h-3.5" />
+                <span>Карта и Масштаб</span>
               </button>
               <button
                 onClick={() => setActiveTab("zones")}
@@ -401,7 +484,7 @@ export function Plume3DView() {
                 }`}
               >
                 <ShieldAlert className="w-3.5 h-3.5" />
-                <span>Зоны аварийного реагирования</span>
+                <span>Зоны и Изолинии H*(10)</span>
               </button>
               <button
                 onClick={() => setActiveTab("probe")}
@@ -412,7 +495,7 @@ export function Plume3DView() {
                 }`}
               >
                 <MapPin className="w-3.5 h-3.5" />
-                <span>Зонд и Нормативы</span>
+                <span>Зонд и Лимиты</span>
               </button>
             </div>
 
@@ -422,7 +505,7 @@ export function Plume3DView() {
                 <div className="grid grid-cols-3 gap-5">
                   <div>
                     <label className="text-xs text-slate-400 block mb-1.5">
-                      Радионуклид (30+ изотопов)
+                      Радионуклид (33 изотопа)
                     </label>
                     <select
                       value={selectedIsotopeSymbol}
@@ -513,7 +596,7 @@ export function Plume3DView() {
                     </div>
 
                     <div className="mt-3 p-2 rounded bg-slate-900/60 border border-slate-800 text-[11px] text-slate-300">
-                      Интенсивность выброса Q:{" "}
+                      Интенсивность Q:{" "}
                       <strong className="text-cyan-300 font-mono">
                         {modelOutput.emissionRateBqPerSec.toExponential(2)} Бк/с
                       </strong>
@@ -607,22 +690,148 @@ export function Plume3DView() {
                 </div>
               )}
 
+              {activeTab === "map" && (
+                <div className="grid grid-cols-3 gap-5">
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1.5">
+                      Тип подложки карты
+                    </label>
+                    <div className="space-y-1.5">
+                      {(
+                        [
+                          {
+                            id: "satellite",
+                            name: "Спутниковый снимок (Гибрид)",
+                            desc: "Поля, река, дороги, жилая застройка",
+                          },
+                          {
+                            id: "topographic",
+                            name: "Топографическая карта",
+                            desc: "Горизонтали рельефа, гидрография",
+                          },
+                          {
+                            id: "tactical",
+                            name: "Тактическая тёмная сетка",
+                            desc: "Контрастный командный режим",
+                          },
+                          {
+                            id: "osm",
+                            name: "OpenStreetMap",
+                            desc: "Обзорная открытая карта местности",
+                          },
+                        ] as const
+                      ).map((item) => (
+                        <button
+                          key={item.id}
+                          onClick={() => setMapStyle(item.id)}
+                          className={`w-full text-left p-2 rounded-lg border transition-all text-xs ${
+                            mapStyle === item.id
+                              ? "border-emerald-500 bg-emerald-950/40 text-white font-medium"
+                              : "border-slate-800 bg-slate-900/60 text-slate-300 hover:border-slate-700"
+                          }`}
+                        >
+                          <div className="font-semibold">{item.name}</div>
+                          <div className="text-[10px] text-slate-400">{item.desc}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1.5">
+                      Географическая привязка эпицентра
+                    </label>
+                    <div className="space-y-2 text-xs">
+                      <div>
+                        <span className="text-slate-400">Широта (Lat):</span>
+                        <input
+                          type="number"
+                          step="0.001"
+                          value={siteLat}
+                          onChange={(e) => setSiteLat(parseFloat(e.target.value) || 40.212)}
+                          className="w-full bg-[#1e293b] border border-slate-700 rounded px-2 py-1 text-white mt-1"
+                        />
+                      </div>
+                      <div>
+                        <span className="text-slate-400">Долгота (Lon):</span>
+                        <input
+                          type="number"
+                          step="0.001"
+                          value={siteLon}
+                          onChange={(e) => setSiteLon(parseFloat(e.target.value) || 68.865)}
+                          className="w-full bg-[#1e293b] border border-slate-700 rounded px-2 py-1 text-white mt-1"
+                        />
+                      </div>
+                      <div className="text-[10px] text-slate-400 bg-slate-900/60 p-2 rounded border border-slate-800">
+                        Охват модели: <strong>12 × 12 км</strong> вокруг аварийной площадки. Строгий
+                        масштаб 1:1 (1 единица = 1 метр).
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1.5">Слои визуализации</label>
+                    <div className="space-y-2 text-xs">
+                      <label className="flex items-center justify-between cursor-pointer p-1.5 rounded bg-slate-900/60 border border-slate-800">
+                        <span>Изолинии H*(10) на карте:</span>
+                        <input
+                          type="checkbox"
+                          checked={showIsolines}
+                          onChange={(e) => setShowIsolines(e.target.checked)}
+                          className="rounded accent-cyan-400"
+                        />
+                      </label>
+                      <label className="flex items-center justify-between cursor-pointer p-1.5 rounded bg-slate-900/60 border border-slate-800">
+                        <span>Круговые зоны аварийного реагирования:</span>
+                        <input
+                          type="checkbox"
+                          checked={showZones}
+                          onChange={(e) => setShowZones(e.target.checked)}
+                          className="rounded accent-cyan-400"
+                        />
+                      </label>
+                      <label className="flex items-center justify-between cursor-pointer p-1.5 rounded bg-slate-900/60 border border-slate-800">
+                        <span>Осевая линия факела (Centerline):</span>
+                        <input
+                          type="checkbox"
+                          checked={showCenterline}
+                          onChange={(e) => setShowCenterline(e.target.checked)}
+                          className="rounded accent-cyan-400"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {activeTab === "zones" && (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-slate-400">
-                      Радиусы защитных зон (НРБ-99/2009 & МАГАТЭ GS-R-2):
+                      Границы зон защитных мероприятий и изолинии H*(10):
                     </span>
-                    <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={showZones}
-                        onChange={(e) => setShowZones(e.target.checked)}
-                        className="rounded accent-cyan-400"
-                      />
-                      <span>Отображать границы зон в 3D</span>
-                    </label>
+                    <div className="flex items-center gap-4">
+                      <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={showIsolines}
+                          onChange={(e) => setShowIsolines(e.target.checked)}
+                          className="rounded accent-cyan-400"
+                        />
+                        <span>Изолинии H*(10)</span>
+                      </label>
+                      <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={showZones}
+                          onChange={(e) => setShowZones(e.target.checked)}
+                          className="rounded accent-cyan-400"
+                        />
+                        <span>Зоны реагирования</span>
+                      </label>
+                    </div>
                   </div>
+
                   <div className="grid grid-cols-4 gap-3">
                     {modelOutput.zones.map((zone) => (
                       <div
@@ -646,6 +855,23 @@ export function Plume3DView() {
                         </div>
                       </div>
                     ))}
+                  </div>
+
+                  {/* Isolines legend */}
+                  <div className="flex items-center gap-4 text-xs pt-1 border-t border-slate-800">
+                    <span className="text-slate-400 text-[11px]">Изолинии на грунте:</span>
+                    <span className="flex items-center gap-1.5 text-rose-400 font-mono text-[11px]">
+                      <span className="w-2.5 h-0.5 bg-rose-500 inline-block" /> 50 мЗв/ч
+                    </span>
+                    <span className="flex items-center gap-1.5 text-orange-400 font-mono text-[11px]">
+                      <span className="w-2.5 h-0.5 bg-orange-500 inline-block" /> 10 мЗв/ч
+                    </span>
+                    <span className="flex items-center gap-1.5 text-yellow-400 font-mono text-[11px]">
+                      <span className="w-2.5 h-0.5 bg-yellow-500 inline-block" /> 1.0 мЗв/ч
+                    </span>
+                    <span className="flex items-center gap-1.5 text-cyan-400 font-mono text-[11px]">
+                      <span className="w-2.5 h-0.5 bg-cyan-500 inline-block" /> 0.1 мЗв/ч
+                    </span>
                   </div>
                 </div>
               )}
@@ -688,8 +914,8 @@ export function Plume3DView() {
                     </div>
                     <input
                       type="range"
-                      min={-2000}
-                      max={4000}
+                      min={-3000}
+                      max={5000}
                       step={25}
                       value={probePos.x}
                       onChange={(e) =>
@@ -706,8 +932,8 @@ export function Plume3DView() {
                     </div>
                     <input
                       type="range"
-                      min={-2000}
-                      max={2000}
+                      min={-3000}
+                      max={3000}
                       step={25}
                       value={probePos.y}
                       onChange={(e) =>
@@ -719,7 +945,7 @@ export function Plume3DView() {
 
                   <div>
                     <label className="text-xs text-slate-400 block mb-1.5">
-                      Настройки 3D рендера
+                      Настройки 3D рендера облака
                     </label>
                     <div className="space-y-2 text-xs">
                       <div className="flex items-center justify-between">
@@ -741,15 +967,10 @@ export function Plume3DView() {
                         </div>
                       </div>
 
-                      <label className="flex items-center justify-between cursor-pointer">
-                        <span>Ось факела (Centerline):</span>
-                        <input
-                          type="checkbox"
-                          checked={showCenterline}
-                          onChange={(e) => setShowCenterline(e.target.checked)}
-                          className="rounded accent-cyan-400"
-                        />
-                      </label>
+                      <div className="text-[11px] text-slate-400 bg-slate-900/60 p-2 rounded border border-slate-800">
+                        Оптимизированный рендеринг: пре-аллоцированные Float32Array буферы, нулевой
+                        GC оверхед.
+                      </div>
                     </div>
                   </div>
                 </div>

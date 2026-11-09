@@ -5,67 +5,73 @@ import type {
   Meteorology3D,
   DispersionPointResult,
   ZoneBoundary3D,
+  PlumeIsoline3D,
   Plume3DModelOutput,
 } from "./types";
 import { getExtendedIsotope } from "./isotopes";
 
 /**
- * Breathing rate for reference adult during light activity (m³/s)
- * 1.2 m³/h = 3.333e-4 m³/s (ICRP Publication 66)
+ * Breathing rate for reference adult during light physical activity (m³/s)
+ * 1.2 m³/h = 3.333e-4 m³/s (ICRP Publication 66 / 71)
  */
 export const ADULT_BREATHING_RATE_M3_S = 1.2 / 3600;
 
 /**
  * Calculates Briggs dispersion coefficients σ_y and σ_z (meters)
- * as a function of downwind distance x (meters) and Pasquill stability class A-F.
+ * with virtual source diameter regularization (eliminates division by zero at x -> 0).
  */
 export function calculateDispersionCoefficients(
   xMeters: number,
   stability: StabilityClass,
 ): { sigmaY: number; sigmaZ: number } {
-  const x = Math.max(1, xMeters);
+  const x = Math.max(0, xMeters);
 
-  let sigmaY = 0;
-  let sigmaZ = 0;
+  let rawSigmaY = 0;
+  let rawSigmaZ = 0;
 
   switch (stability) {
     case "A":
-      sigmaY = 0.22 * x * Math.pow(1 + 0.0001 * x, -0.5);
-      sigmaZ = 0.2 * x;
+      rawSigmaY = 0.22 * x * Math.pow(1 + 0.0001 * x, -0.5);
+      rawSigmaZ = 0.2 * x;
       break;
     case "B":
-      sigmaY = 0.16 * x * Math.pow(1 + 0.0001 * x, -0.5);
-      sigmaZ = 0.12 * x;
+      rawSigmaY = 0.16 * x * Math.pow(1 + 0.0001 * x, -0.5);
+      rawSigmaZ = 0.12 * x;
       break;
     case "C":
-      sigmaY = 0.11 * x * Math.pow(1 + 0.0001 * x, -0.5);
-      sigmaZ = 0.08 * x * Math.pow(1 + 0.0002 * x, -0.5);
+      rawSigmaY = 0.11 * x * Math.pow(1 + 0.0001 * x, -0.5);
+      rawSigmaZ = 0.08 * x * Math.pow(1 + 0.0002 * x, -0.5);
       break;
     case "D":
-      sigmaY = 0.08 * x * Math.pow(1 + 0.0001 * x, -0.5);
-      sigmaZ = 0.06 * x * Math.pow(1 + 0.0015 * x, -0.5);
+      rawSigmaY = 0.08 * x * Math.pow(1 + 0.0001 * x, -0.5);
+      rawSigmaZ = 0.06 * x * Math.pow(1 + 0.0015 * x, -0.5);
       break;
     case "E":
-      sigmaY = 0.06 * x * Math.pow(1 + 0.0001 * x, -0.5);
-      sigmaZ = 0.03 * x * Math.pow(1 + 0.0003 * x, -1.0);
+      rawSigmaY = 0.06 * x * Math.pow(1 + 0.0001 * x, -0.5);
+      rawSigmaZ = 0.03 * x * Math.pow(1 + 0.0003 * x, -1.0);
       break;
     case "F":
     default:
-      sigmaY = 0.04 * x * Math.pow(1 + 0.0001 * x, -0.5);
-      sigmaZ = 0.016 * x * Math.pow(1 + 0.0003 * x, -1.0);
+      rawSigmaY = 0.04 * x * Math.pow(1 + 0.0001 * x, -0.5);
+      rawSigmaZ = 0.016 * x * Math.pow(1 + 0.0003 * x, -1.0);
       break;
   }
 
+  // Physical stack orifice size added in quadrature:
+  // σ_y0 ≈ 2.5m, σ_z0 ≈ 1.5m prevents mathematical singularity at x=0
+  const sigmaY0 = 2.5;
+  const sigmaZ0 = 1.5;
+
   return {
-    sigmaY: Math.max(0.5, sigmaY),
-    sigmaZ: Math.max(0.5, sigmaZ),
+    sigmaY: Math.sqrt(rawSigmaY * rawSigmaY + sigmaY0 * sigmaY0),
+    sigmaZ: Math.sqrt(rawSigmaZ * rawSigmaZ + sigmaZ0 * sigmaZ0),
   };
 }
 
 /**
  * Gaussian plume volumetric concentration C(x, y, z) in Bq/m³
  * in the plume's intrinsic coordinate system:
- * - x: downwind distance from source (m, x >= 0)
+ * - x: downwind distance from source (m)
  * - y: crosswind horizontal offset from centerline (m)
  * - z: elevation above ground (m, z >= 0)
  * - H: effective release height (m)
@@ -81,24 +87,29 @@ export function calculateGaussianConcentration(
   decayConstant: number = 0,
   mixingHeight: number = 1000,
 ): number {
-  if (xDownwind <= 0) return 0;
+  if (emissionRateBqPerSec <= 0) return 0;
 
+  // Upwind turbulent back-diffusion cutoff
+  if (xDownwind < -30) return 0;
+  const upwindFactor = xDownwind < 0 ? Math.exp(-Math.pow(Math.abs(xDownwind) / 8.0, 2)) : 1.0;
+
+  const effectiveDownwind = Math.max(0, xDownwind);
   const u = Math.max(0.5, windSpeed);
-  const { sigmaY, sigmaZ } = calculateDispersionCoefficients(xDownwind, stability);
+  const { sigmaY, sigmaZ } = calculateDispersionCoefficients(effectiveDownwind, stability);
 
   // Crosswind horizontal Gaussian component
   const crosswindTerm = Math.exp(-0.5 * Math.pow(yCrosswind / sigmaY, 2));
 
   // Vertical Gaussian component with ground reflection and optional mixing lid reflections
   let verticalTerm = 0;
-  const H = effectiveHeight;
+  const H = Math.max(0, effectiveHeight);
   const z = Math.max(0, zHeight);
 
   if (mixingHeight > 0 && sigmaZ > 0.6 * mixingHeight) {
-    // Uniform vertical mixing between ground and inversion lid
+    // Uniform vertical mixing between ground and planetary boundary layer lid
     verticalTerm = (Math.sqrt(2 * Math.PI) * sigmaZ) / mixingHeight;
   } else {
-    // Ground reflection + lid reflection sum
+    // Ground reflection + boundary lid reflections
     const maxN = mixingHeight > 0 ? 2 : 0;
     for (let n = -maxN; n <= maxN; n++) {
       const zShift = 2 * n * mixingHeight;
@@ -110,11 +121,11 @@ export function calculateGaussianConcentration(
 
   // Pre-exponential factor: Q / (2 * pi * u * sigma_y * sigma_z)
   const normFactor = emissionRateBqPerSec / (2 * Math.PI * u * sigmaY * sigmaZ);
-  let concentration = normFactor * crosswindTerm * verticalTerm;
+  let concentration = normFactor * crosswindTerm * verticalTerm * upwindFactor;
 
   // Radioactive decay during transit time t = x / u
-  if (decayConstant > 0) {
-    const transitTimeSec = xDownwind / u;
+  if (decayConstant > 0 && effectiveDownwind > 0) {
+    const transitTimeSec = effectiveDownwind / u;
     concentration *= Math.exp(-decayConstant * transitTimeSec);
   }
 
@@ -122,7 +133,8 @@ export function calculateGaussianConcentration(
 }
 
 /**
- * Calculates dose rates and safe stay time at a given 3D coordinate point.
+ * Calculates Ambient Dose Equivalent Rate H*(10) and Inhalation Dose Rate
+ * at a given 3D coordinate point.
  */
 export function calculatePointRadiologicalDose(
   xDownwind: number,
@@ -146,31 +158,33 @@ export function calculatePointRadiologicalDose(
     met.mixingHeight,
   );
 
-  // 1. Inhalation dose rate: H_dot_inh = C · V_br · e_inh · 1000 (mSv/h)
-  // (3600 converts per-second to per-hour)
+  // 1. Inhalation dose rate: H_dot_inh = C · V_br · e_inh · 3600 · 1000 (mSv/h)
   const inhalationDoseRate =
     concentration * ADULT_BREATHING_RATE_M3_S * isotope.inhalationCoefficient * 3600 * 1000;
 
-  // 2. Cloud immersion / external gamma dose rate
-  // Submersion dose coefficient e_sub is in (Sv/s) / (Bq/m³)
-  let gammaDoseRate = concentration * isotope.externalImmersionCoefficient * 3600 * 1000;
+  // 2. Cloud immersion external dose rate: e_sub (Sv/s per Bq/m³) -> mSv/h
+  const immersionDoseRate = concentration * isotope.externalImmersionCoefficient * 3600 * 1000;
 
-  // Plus direct line-of-sight core shine with Taylor/Berger air buildup factor if within 500m of source
+  // 3. Direct line-of-sight core/stack gamma shine with Taylor/Berger air buildup factor
   const directDistance = Math.hypot(xDownwind, yCrosswind, zHeight - source.effectiveHeight);
+  let directShineDoseRate = 0;
   if (directDistance > 0 && isotope.gammaConstant > 0) {
     const activityGbg = source.totalActivity / 1e9;
-    // Air attenuation mu * r
-    const muR = isotope.buildup.muAir * directDistance;
+    const muR = Math.max(0, isotope.buildup.muAir * directDistance);
     const buildupFactor = 1 + isotope.buildup.a * muR * Math.exp(isotope.buildup.b * muR);
-    const directShine =
+    directShineDoseRate =
       (isotope.gammaConstant * activityGbg * buildupFactor * Math.exp(-muR)) /
       Math.pow(Math.max(5, directDistance), 2);
-    gammaDoseRate += directShine * 0.1; // geometric source volume weighting
+    directShineDoseRate *= 0.1; // Geometric source volume weighting
   }
 
-  const totalDoseRate = inhalationDoseRate + gammaDoseRate;
+  // Ambient Dose Equivalent Rate H*(10) is the sum of external photon fields:
+  const ambientDoseEquivalentRateH10 = immersionDoseRate + directShineDoseRate;
 
-  // 3. Safe stay time: t_max = D_limit / H_dot (hours -> minutes)
+  // Total equivalent radiological hazard rate:
+  const totalDoseRate = ambientDoseEquivalentRateH10 + inhalationDoseRate;
+
+  // 4. Safe stay time: t_max = D_limit / H_dot (hours -> minutes)
   let safeStayTimeMinutes = 999999;
   if (totalDoseRate > 1e-6) {
     safeStayTimeMinutes = (doseLimitMsv / totalDoseRate) * 60;
@@ -181,7 +195,8 @@ export function calculatePointRadiologicalDose(
     y: yCrosswind,
     z: zHeight,
     concentration,
-    gammaDoseRate,
+    gammaDoseRate: ambientDoseEquivalentRateH10,
+    ambientDoseEquivalentRateH10,
     inhalationDoseRate,
     totalDoseRate,
     safeStayTimeMinutes: Math.max(0.1, safeStayTimeMinutes),
@@ -217,7 +232,6 @@ export function calculateProtectiveZones(
   met: Meteorology3D,
   isotope: Isotope3D,
 ): ZoneBoundary3D[] {
-  const emissionRate = source.totalActivity / Math.max(1, source.releaseDuration);
   const sampleDistances = [
     50, 100, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 5000, 7500, 10000, 15000, 20000, 30000,
   ];
@@ -279,7 +293,79 @@ export function calculateProtectiveZones(
 }
 
 /**
- * Computes full centerline profile and summary model output for the 3D visualizer and IPC bridge.
+ * Generates ground-level Dose Rate Isolines (Изолинии H*(10))
+ * for 0.1, 1.0, 10.0, 50.0 mSv/h in geographic world coordinates (x, z).
+ */
+export function generatePlumeIsolines(
+  source: PlumeSource3D,
+  met: Meteorology3D,
+  isotope: Isotope3D,
+): PlumeIsoline3D[] {
+  const thresholds = [
+    { level: 50.0, label: "50 мЗв/ч (Опасность)", color: "#ef4444" },
+    { level: 10.0, label: "10 мЗв/ч (Эвакуация)", color: "#f97316" },
+    { level: 1.0, label: "1.0 мЗв/ч (Укрытие)", color: "#eab308" },
+    { level: 0.1, label: "0.1 мЗв/ч (Контроль)", color: "#06b6d4" },
+  ];
+
+  const isolines: PlumeIsoline3D[] = [];
+  const maxSearchDist = 12000;
+
+  thresholds.forEach((th) => {
+    const forwardPoints: { x: number; z: number }[] = [];
+    const backwardPoints: { x: number; z: number }[] = [];
+
+    // Sample along downwind axis
+    for (let x = 10; x <= maxSearchDist; x += 100) {
+      const centerlineDose = calculatePointRadiologicalDose(
+        x,
+        0,
+        1.5,
+        source,
+        met,
+        isotope,
+        1.0,
+      ).totalDoseRate;
+
+      if (centerlineDose < th.level * 0.95 && x > 200) {
+        // Drop below threshold at distance
+        break;
+      }
+
+      const { sigmaY } = calculateDispersionCoefficients(x, met.stabilityClass);
+
+      // Solve for crosswind width y where dose = th.level:
+      // dose(y) = dose(0) * exp(-0.5 * (y / sigmaY)^2) = th.level
+      // y = sigmaY * sqrt(2 * ln(dose(0) / th.level))
+      if (centerlineDose >= th.level) {
+        const ratio = Math.max(1.0001, centerlineDose / th.level);
+        const yCross = sigmaY * Math.sqrt(2 * Math.log(ratio));
+
+        // Transform downwind (x, +y) and (x, -y) to world coordinates (X, Z)
+        const ptRight = plumeToWorldCoordinates(x, yCross, source.position, met.windDirectionDeg);
+        const ptLeft = plumeToWorldCoordinates(x, -yCross, source.position, met.windDirectionDeg);
+
+        forwardPoints.push({ x: ptRight.worldX, z: ptRight.worldZ });
+        backwardPoints.unshift({ x: ptLeft.worldX, z: ptLeft.worldZ });
+      }
+    }
+
+    if (forwardPoints.length >= 2) {
+      const allPoints = [...forwardPoints, ...backwardPoints];
+      isolines.push({
+        doseThresholdMsvH: th.level,
+        label: th.label,
+        colorHex: th.color,
+        points: allPoints,
+      });
+    }
+  });
+
+  return isolines;
+}
+
+/**
+ * Computes full centerline profile, protective zones, and isolines.
  */
 export function runGaussianPlume3DModel(
   source: PlumeSource3D,
@@ -312,6 +398,7 @@ export function runGaussianPlume3DModel(
       sigmaZ,
       groundConcentration: pt.concentration,
       groundDoseRateMsvH: pt.totalDoseRate,
+      ambientDoseEquivalentRateH10: pt.ambientDoseEquivalentRateH10,
       inhalationDoseRateMsvH: pt.inhalationDoseRate,
       accumulatedDoseMsv: accumulated,
       safeStayTimeMin: pt.safeStayTimeMinutes,
@@ -319,6 +406,7 @@ export function runGaussianPlume3DModel(
   });
 
   const zones = calculateProtectiveZones(source, met, isotope);
+  const isolines = generatePlumeIsolines(source, met, isotope);
 
   return {
     source,
@@ -329,17 +417,17 @@ export function runGaussianPlume3DModel(
     peakGroundDoseDistanceM,
     peakGroundDoseRateMsvH,
     zones,
+    isolines,
   };
 }
 
 /**
  * Transforms world coordinates (X, Y, Z in Three.js space) to
  * downwind plume coordinates (x_dw, y_cw, z_height) according to wind direction angle.
- * Wind direction in meteorology: direction the wind is blowing FROM.
  * In Three.js space:
  * - X is horizontal (East positive)
  * - Y is elevation/height (Up positive)
- * - Z is horizontal (North positive or standard WebGL depth)
+ * - Z is horizontal (-Z is North, +Z is South)
  */
 export function worldToPlumeCoordinates(
   worldX: number,
@@ -352,8 +440,8 @@ export function worldToPlumeCoordinates(
   const dz = worldZ - sourcePos.z;
   const zHeight = Math.max(0, worldY);
 
-  // Plume travels TOWARDS angle (windDirectionDeg + 180) degrees
-  // Wind vector angle in radians
+  // Wind blows FROM windDirectionDeg.
+  // The plume travels TOWARDS (windDirectionDeg + 180) degrees.
   const windTravelAngleRad = (((windDirectionDeg + 180) % 360) * Math.PI) / 180;
 
   // Unit vector of downwind travel:
@@ -369,4 +457,28 @@ export function worldToPlumeCoordinates(
   const yCrosswind = dx * cX + dz * cZ;
 
   return { xDownwind, yCrosswind, zHeight };
+}
+
+/**
+ * Transforms downwind plume coordinates (xDownwind, yCrosswind)
+ * back to world coordinates (worldX, worldZ)
+ */
+export function plumeToWorldCoordinates(
+  xDownwind: number,
+  yCrosswind: number,
+  sourcePos: { x: number; y: number; z: number },
+  windDirectionDeg: number,
+): { worldX: number; worldZ: number } {
+  const windTravelAngleRad = (((windDirectionDeg + 180) % 360) * Math.PI) / 180;
+
+  const uX = Math.sin(windTravelAngleRad);
+  const uZ = -Math.cos(windTravelAngleRad);
+
+  const cX = Math.cos(windTravelAngleRad);
+  const cZ = Math.sin(windTravelAngleRad);
+
+  const worldX = sourcePos.x + xDownwind * uX + yCrosswind * cX;
+  const worldZ = sourcePos.z + xDownwind * uZ + yCrosswind * cZ;
+
+  return { worldX, worldZ };
 }

@@ -47,6 +47,8 @@ export interface Isotope3D {
   description: string;
 }
 
+export type MapStyleType = "satellite" | "topographic" | "tactical" | "osm";
+
 export interface PlumeSource3D {
   isotopeSymbol: string;
   /** Total release activity in Becquerels (Bq) */
@@ -57,6 +59,10 @@ export interface PlumeSource3D {
   position: { x: number; y: number; z: number };
   /** Effective release height (physical stack height + plume rise Δh) in meters */
   effectiveHeight: number;
+  /** Geographic latitude of release site */
+  latitude?: number;
+  /** Geographic longitude of release site */
+  longitude?: number;
   /** Plume rise Δh (m) from buoyancy/momentum */
   plumeRise?: number;
 }
@@ -85,10 +91,22 @@ export interface DispersionPointResult {
   gammaDoseRate: number;
   /** Inhalation dose rate in mSv/h */
   inhalationDoseRate: number;
-  /** Total equivalent dose rate H_dot in mSv/h */
+  /**
+   * Ambient Dose Equivalent Rate H*(10) in mSv/h
+   * (Мощность амбиентного эквивалента дозы H*(10))
+   */
+  ambientDoseEquivalentRateH10: number;
+  /** Total equivalent dose rate H_dot in mSv/h (H*(10) + Inhalation) */
   totalDoseRate: number;
   /** Safe stay time in minutes until reaching dose limit */
   safeStayTimeMinutes: number;
+}
+
+export interface PlumeIsoline3D {
+  doseThresholdMsvH: number;
+  label: string;
+  colorHex: string;
+  points: { x: number; z: number }[];
 }
 
 export interface Plume3DGridSlice {
@@ -117,6 +135,7 @@ export interface Plume3DModelOutput {
     sigmaZ: number;
     groundConcentration: number;
     groundDoseRateMsvH: number;
+    ambientDoseEquivalentRateH10: number;
     inhalationDoseRateMsvH: number;
     accumulatedDoseMsv: number;
     safeStayTimeMin: number;
@@ -124,6 +143,7 @@ export interface Plume3DModelOutput {
   peakGroundDoseDistanceM: number;
   peakGroundDoseRateMsvH: number;
   zones: ZoneBoundary3D[];
+  isolines: PlumeIsoline3D[];
 }
 
 export interface DosimeterProbe {
