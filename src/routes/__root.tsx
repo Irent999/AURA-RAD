@@ -77,14 +77,20 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Lovable App" },
-      { name: "description", content: "Lovable Generated Project" },
-      { name: "author", content: "Lovable" },
-      { property: "og:title", content: "Lovable App" },
-      { property: "og:description", content: "Lovable Generated Project" },
+      { title: "AURA-RAD | Radiological Plume & Dose Modeling Studio" },
+      {
+        name: "description",
+        content:
+          "Atmospheric radiation hazard simulator for modeling radionuclide releases, Gaussian plume dispersion, cloudshine, inhalation and groundshine doses, and protective action zones.",
+      },
+      { property: "og:title", content: "AURA-RAD | Radiological Plume & Dose Modeling Studio" },
+      {
+        property: "og:description",
+        content:
+          "Atmospheric radiation hazard simulator for modeling radionuclide releases, Gaussian plume dispersion, cloudshine, inhalation and groundshine doses, and protective action zones.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
-      { name: "twitter:site", content: "@Lovable" },
     ],
     links: [
       {

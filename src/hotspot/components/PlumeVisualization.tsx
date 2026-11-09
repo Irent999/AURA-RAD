@@ -1,26 +1,31 @@
-import { useEffect, useMemo } from 'react';
-import { MapContainer, TileLayer, Tooltip, Polyline, CircleMarker, useMap } from 'react-leaflet';
-import { HeatmapLayer } from './HeatmapLayer';
-import type { DispersionResult } from '../lib/types';
-import { formatDistance, formatActivity } from '../lib/dispersion';
+import { useEffect, useMemo } from "react";
+import { MapContainer, TileLayer, Tooltip, Polyline, CircleMarker, useMap } from "react-leaflet";
+import { HeatmapLayer } from "./HeatmapLayer";
+import type { DispersionResult } from "../lib/types";
+import { formatDistance, formatActivity } from "../lib/dispersion";
 
 interface PlumeVisualizationProps {
   result: DispersionResult;
 }
 
 const COLOR_SCALE = [
-  { threshold: 0.75, color: '#7c2d12' },
-  { threshold: 0.5, color: '#dc2626' },
-  { threshold: 0.25, color: '#f97316' },
-  { threshold: 0.1, color: '#eab308' },
-  { threshold: 0.05, color: '#84cc16' },
-  { threshold: 0.01, color: '#22c55e' },
-  { threshold: 0, color: '#06b6d4' },
+  { threshold: 0.75, color: "#7c2d12" },
+  { threshold: 0.5, color: "#dc2626" },
+  { threshold: 0.25, color: "#f97316" },
+  { threshold: 0.1, color: "#eab308" },
+  { threshold: 0.05, color: "#84cc16" },
+  { threshold: 0.01, color: "#22c55e" },
+  { threshold: 0, color: "#06b6d4" },
 ];
 
 const EARTH_RADIUS_M = 6371000;
 
-function metersToLatLng(lat0: number, lon0: number, xMeters: number, yMeters: number): [number, number] {
+function metersToLatLng(
+  lat0: number,
+  lon0: number,
+  xMeters: number,
+  yMeters: number,
+): [number, number] {
   const dLat = (yMeters / EARTH_RADIUS_M) * (180 / Math.PI);
   const dLon = (xMeters / (EARTH_RADIUS_M * Math.cos((lat0 * Math.PI) / 180))) * (180 / Math.PI);
   return [lat0 + dLat, lon0 + dLon];
@@ -62,9 +67,9 @@ export function PlumeVisualization({ result }: PlumeVisualizationProps) {
     }
 
     const zones = [
-      { radius: result.zoneSummary.exclusionZone, color: '#ef4444', label: 'Exclusion' },
-      { radius: result.zoneSummary.contaminationZone, color: '#f59e0b', label: 'Contamination' },
-      { radius: result.zoneSummary.ingestionZone, color: '#3b82f6', label: 'Ingestion' },
+      { radius: result.zoneSummary.exclusionZone, color: "#ef4444", label: "Exclusion" },
+      { radius: result.zoneSummary.contaminationZone, color: "#f59e0b", label: "Contamination" },
+      { radius: result.zoneSummary.ingestionZone, color: "#3b82f6", label: "Ingestion" },
     ].filter((z) => z.radius > 0);
 
     const zonePolys = zones.map((zone) => {
@@ -100,27 +105,30 @@ export function PlumeVisualization({ result }: PlumeVisualizationProps) {
     <div className="p-4 h-full flex flex-col">
       <div className="panel p-4 flex-1 flex flex-col" style={{ minHeight: 0 }}>
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+          <h3 className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
             Plume Footprint — Geographic Map
           </h3>
           <div className="flex items-center gap-3">
             {COLOR_SCALE.map((c, i) => (
               <div key={i} className="flex items-center gap-1">
                 <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: c.color }} />
-                <span className="text-xs" style={{ color: 'var(--text-tertiary)' }}>
-                  {c.threshold === 0 ? '<1%' : `${c.threshold * 100}%`}
+                <span className="text-xs" style={{ color: "var(--text-tertiary)" }}>
+                  {c.threshold === 0 ? "<1%" : `${c.threshold * 100}%`}
                 </span>
               </div>
             ))}
           </div>
         </div>
 
-        <div className="flex-1 rounded-lg overflow-hidden" style={{ minHeight: 500, backgroundColor: '#1a2230' }}>
+        <div
+          className="flex-1 rounded-lg overflow-hidden"
+          style={{ minHeight: 500, backgroundColor: "#1a2230" }}
+        >
           <MapContainer
             key={mapKey}
             center={[lat0, lon0]}
             zoom={zoomLevel}
-            style={{ height: '100%', width: '100%', backgroundColor: '#1a2230' }}
+            style={{ height: "100%", width: "100%", backgroundColor: "#1a2230" }}
             scrollWheelZoom={true}
             attributionControl={true}
           >
@@ -143,7 +151,7 @@ export function PlumeVisualization({ result }: PlumeVisualizationProps) {
                   color: zone.color,
                   weight: 2,
                   opacity: 0.7,
-                  dashArray: '6 4',
+                  dashArray: "6 4",
                 }}
               >
                 <Tooltip sticky>
@@ -155,14 +163,14 @@ export function PlumeVisualization({ result }: PlumeVisualizationProps) {
             {/* ВЕКТОР НАПРАВЛЕНИЯ ВЕТРА */}
             <Polyline
               positions={[[lat0, lon0], windArrowEnd]}
-              pathOptions={{ color: '#06b6d4', weight: 3, opacity: 0.8 }}
+              pathOptions={{ color: "#06b6d4", weight: 3, opacity: 0.8 }}
             />
 
             {/* ТОЧКА ИСТОЧНИКА ВЫБРОСА */}
             <CircleMarker
               center={[lat0, lon0]}
               radius={8}
-              pathOptions={{ color: '#ef4444', fillColor: '#ef4444', fillOpacity: 1, weight: 2 }}
+              pathOptions={{ color: "#ef4444", fillColor: "#ef4444", fillOpacity: 1, weight: 2 }}
             >
               <Tooltip permanent direction="top" offset={[0, -10]}>
                 {tooltipText}
@@ -171,18 +179,24 @@ export function PlumeVisualization({ result }: PlumeVisualizationProps) {
           </MapContainer>
         </div>
 
-        <div className="flex items-center gap-4 mt-3 pt-3 border-t" style={{ borderColor: 'var(--border-default)' }}>
+        <div
+          className="flex items-center gap-4 mt-3 pt-3 border-t"
+          style={{ borderColor: "var(--border-default)" }}
+        >
           {zoneCircles.map((zone, i) => (
             <div key={i} className="flex items-center gap-2">
-              <div className="w-4 h-4 rounded-full border-2" style={{ borderColor: zone.color, borderStyle: 'dashed' }} />
-              <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+              <div
+                className="w-4 h-4 rounded-full border-2"
+                style={{ borderColor: zone.color, borderStyle: "dashed" }}
+              />
+              <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
                 {zone.label}: {formatDistance(zone.radius)}
               </span>
             </div>
           ))}
           <div className="flex items-center gap-2 ml-auto">
-            <div className="w-4 h-1" style={{ backgroundColor: '#06b6d4' }} />
-            <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+            <div className="w-4 h-1" style={{ backgroundColor: "#06b6d4" }} />
+            <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
               Wind: {windDir}° at {result.input.meteorology.windSpeed} m/s
             </span>
           </div>

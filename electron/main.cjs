@@ -84,7 +84,10 @@ async function createWindow() {
 
   const url = `http://127.0.0.1:${port}`;
   if (!(await waitForServer(url))) {
-    dialog.showErrorBox("AURA-RAD", "Не удалось запустить внутренний сервер.\nПроверьте, что папка resources\\.output на месте.");
+    dialog.showErrorBox(
+      "AURA-RAD",
+      "Не удалось запустить внутренний сервер.\nПроверьте, что папка resources\\.output на месте.",
+    );
     stopServer();
     app.quit();
     return;
