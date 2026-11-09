@@ -1,7 +1,7 @@
-export type StabilityClass = 'A' | 'B' | 'C' | 'D' | 'E' | 'F';
-export type ReleaseType = 'ground' | 'elevated' | 'stack';
-export type DoseUnit = 'Sv' | 'rem' | 'Gy' | 'rad';
-export type DistanceUnit = 'm' | 'km';
+export type StabilityClass = "A" | "B" | "C" | "D" | "E" | "F";
+export type ReleaseType = "ground" | "elevated" | "stack";
+export type DoseUnit = "Sv" | "rem" | "Gy" | "rad";
+export type DistanceUnit = "m" | "km";
 
 export interface DecayDaughter {
   symbol: string;
@@ -22,9 +22,9 @@ export interface Isotope {
   inhalationCoefficient: number;
   ingestionCoefficient: number;
   externalDoseCoefficient: number;
-  lungClass: 'D' | 'W' | 'Y';
+  lungClass: "D" | "W" | "Y";
   icrpSource: string;
-  decayMode: 'alpha' | 'beta-' | 'beta+' | 'EC' | 'IT' | 'SF' | 'stable';
+  decayMode: "alpha" | "beta-" | "beta+" | "EC" | "IT" | "SF" | "stable";
   daughters: DecayDaughter[];
   notes: string;
 }
@@ -35,7 +35,7 @@ export interface SourceTerm {
   releaseDuration: number;
   releaseHeight: number;
   releaseType: ReleaseType;
-  physicalForm: 'gas' | 'particle' | 'liquid' | 'aerosol';
+  physicalForm: "gas" | "particle" | "liquid" | "aerosol";
   particleSize: number;
   latitude: number;
   longitude: number;
@@ -47,14 +47,14 @@ export interface Meteorology {
   windDirection: number;
   stabilityClass: StabilityClass;
   mixingHeight: number;
-  airTemperature?: number;   // Температура окружающего воздуха (°C)
+  airTemperature?: number; // Температура окружающего воздуха (°C)
   precipitationRate: number;
   inversionHeight: number;
 }
 
 export interface TerrainData {
   surfaceRoughness: number;
-  terrainType: 'urban' | 'rural' | 'forest' | 'water' | 'desert';
+  terrainType: "urban" | "rural" | "forest" | "water" | "desert";
   buildingWake: boolean;
   complexTerrain: boolean;
 }
@@ -65,7 +65,7 @@ export interface DispersionInput {
   terrain: TerrainData;
   distances: number[];
   receptorHeight: number;
-  calculationType: 'plume' | 'puff' | 'shortTerm' | 'longTerm';
+  calculationType: "plume" | "puff" | "shortTerm" | "longTerm";
   averagingTime: number;
 }
 
@@ -75,8 +75,8 @@ export interface DoseResult {
   crosswindSpread: number;
   verticalSpread: number;
   plumeWidth: number;
-  arrivalTime: number;             // Время в секундах
-  arrivalTimeFormatted?: string;    // Форматированная строка (напр. "2.8 ч")
+  arrivalTime: number; // Время в секундах
+  arrivalTimeFormatted?: string; // Форматированная строка (напр. "2.8 ч")
   exposureDuration: number;
   plumeDeposition: number;
   externalDose: number;
@@ -113,7 +113,7 @@ export interface ProtectiveAction {
   action: string;
   zone: string;
   criteria: string;
-  level: 'advisory' | 'caution' | 'alert' | 'emergency';
+  level: "advisory" | "caution" | "alert" | "emergency";
 }
 
 export interface CalculationHistoryEntry {

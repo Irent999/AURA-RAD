@@ -15,12 +15,7 @@ function getAppRoot() {
 }
 
 function getServerPath() {
-  return path.join(
-    getAppRoot(),
-    ".output",
-    "server",
-    "index.mjs"
-  );
+  return path.join(getAppRoot(), ".output", "server", "index.mjs");
 }
 
 function startServer() {
@@ -35,9 +30,9 @@ function startServer() {
       ...process.env,
       NODE_ENV: "production",
       PORT: String(PORT),
-      HOST: "127.0.0.1"
+      HOST: "127.0.0.1",
     },
-    stdio: "pipe"
+    stdio: "pipe",
   });
 
   serverProcess.stdout.on("data", (data) => {
@@ -84,9 +79,7 @@ async function createWindow() {
 
   console.log("CREATE WINDOW: waiting for Nitro");
 
-  const serverReady = await waitForServer(
-    `http://127.0.0.1:${PORT}`
-  );
+  const serverReady = await waitForServer(`http://127.0.0.1:${PORT}`);
 
   console.log("CREATE WINDOW: serverReady =", serverReady);
 
@@ -106,8 +99,8 @@ async function createWindow() {
 
     webPreferences: {
       contextIsolation: true,
-      nodeIntegration: false
-    }
+      nodeIntegration: false,
+    },
   });
 
   console.log("CREATE WINDOW: BrowserWindow created");
@@ -139,9 +132,7 @@ async function createWindow() {
 
   console.log("CREATE WINDOW: loading URL");
 
-  await mainWindow.loadURL(
-    `http://127.0.0.1:${PORT}`
-  );
+  await mainWindow.loadURL(`http://127.0.0.1:${PORT}`);
 
   console.log("CREATE WINDOW: loadURL completed");
 

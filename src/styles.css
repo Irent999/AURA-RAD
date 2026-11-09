@@ -166,17 +166,33 @@
 
 body {
   margin: 0;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family:
+    "Inter",
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
   background-color: var(--bg-primary);
   color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }
 
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: var(--bg-secondary); }
-::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: var(--text-tertiary); }
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-light);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary);
+}
 
 .panel {
   @apply rounded-lg border;
@@ -198,34 +214,101 @@ body {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.15);
 }
-.input-field::placeholder { color: var(--text-tertiary); }
+.input-field::placeholder {
+  color: var(--text-tertiary);
+}
 .btn {
   @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-all duration-150 cursor-pointer select-none;
 }
-.btn-primary { background-color: var(--accent); color: #0a0e14; }
-.btn-primary:hover { background-color: var(--accent-hover); }
-.btn-primary:active { transform: scale(0.98); }
+.btn-primary {
+  background-color: var(--accent);
+  color: #0a0e14;
+}
+.btn-primary:hover {
+  background-color: var(--accent-hover);
+}
+.btn-primary:active {
+  transform: scale(0.98);
+}
 .btn-secondary {
   background-color: var(--bg-elevated);
   color: var(--text-primary);
   border: 1px solid var(--border-default);
 }
-.btn-secondary:hover { background-color: var(--border-default); border-color: var(--border-light); }
-.btn-ghost { color: var(--text-secondary); }
-.btn-ghost:hover { background-color: var(--bg-tertiary); color: var(--text-primary); }
+.btn-secondary:hover {
+  background-color: var(--border-default);
+  border-color: var(--border-light);
+}
+.btn-ghost {
+  color: var(--text-secondary);
+}
+.btn-ghost:hover {
+  background-color: var(--bg-tertiary);
+  color: var(--text-primary);
+}
 .badge {
   @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium;
 }
-.badge-danger { background-color: rgba(239, 68, 68, 0.15); color: #f87171; }
-.badge-warning { background-color: rgba(245, 158, 11, 0.15); color: #fbbf24; }
-.badge-success { background-color: rgba(16, 185, 129, 0.15); color: #34d399; }
-.badge-info { background-color: rgba(59, 130, 246, 0.15); color: #60a5fa; }
-.badge-accent { background-color: rgba(6, 182, 212, 0.15); color: #22d3ee; }
-.badge-neutral { background-color: var(--bg-elevated); color: var(--text-secondary); }
+.badge-danger {
+  background-color: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+}
+.badge-warning {
+  background-color: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+}
+.badge-success {
+  background-color: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+}
+.badge-info {
+  background-color: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+}
+.badge-accent {
+  background-color: rgba(6, 182, 212, 0.15);
+  color: #22d3ee;
+}
+.badge-neutral {
+  background-color: var(--bg-elevated);
+  color: var(--text-secondary);
+}
 
-@keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
-.animate-fadeIn { animation: fadeIn 0.2s ease-out; }
-@keyframes pulse-glow { 0%, 100% { box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.4); } 50% { box-shadow: 0 0 0 8px rgba(6, 182, 212, 0); } }
-.pulse-glow { animation: pulse-glow 2s infinite; }
-@keyframes slideInRight { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
-.animate-slideInRight { animation: slideInRight 0.25s ease-out; }
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-fadeIn {
+  animation: fadeIn 0.2s ease-out;
+}
+@keyframes pulse-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(6, 182, 212, 0);
+  }
+}
+.pulse-glow {
+  animation: pulse-glow 2s infinite;
+}
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.animate-slideInRight {
+  animation: slideInRight 0.25s ease-out;
+}

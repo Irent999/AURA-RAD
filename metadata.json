@@ -1,0 +1,6 @@
+{
+  "name": "AURA-RAD | Radiological Plume & Dose Modeling Studio",
+  "description": "Atmospheric radiation hazard simulator for modeling radionuclide releases, Gaussian plume dispersion, cloudshine, inhalation and groundshine doses, and protective action zones.",
+  "permissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

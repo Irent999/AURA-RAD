@@ -1,7 +1,7 @@
-import { useEffect } from 'react';
-import { useMap } from 'react-leaflet';
-import L from 'leaflet';
-import 'leaflet.heat';
+import { useEffect } from "react";
+import { useMap } from "react-leaflet";
+import L from "leaflet";
+import "leaflet.heat";
 
 interface PlumePoint {
   lat: number;
@@ -53,7 +53,7 @@ export const HeatmapLayer = ({ points }: HeatmapLayerProps) => {
     for (const p of densePathPoints) {
       if (p.val <= 0) continue;
 
-      let normVal = Math.pow(p.val / maxVal, 0.35);
+      const normVal = Math.pow(p.val / maxVal, 0.35);
       const distFromOrigin = Math.hypot(p.lat - origin.lat, p.lng - origin.lng);
       const spreadRadius = Math.max(0.003, distFromOrigin * 0.25);
 
@@ -78,19 +78,22 @@ export const HeatmapLayer = ({ points }: HeatmapLayerProps) => {
       }
     }
 
-    const heatLayer = (L as any).heatLayer(interpolatedPoints, {
+    const leafletWithHeat = L as unknown as {
+      heatLayer: (latlngs: [number, number, number][], options: Record<string, unknown>) => L.Layer;
+    };
+    const heatLayer = leafletWithHeat.heatLayer(interpolatedPoints, {
       radius: 20,
       blur: 14,
       maxZoom: 18,
       max: 1.0,
       minOpacity: 0.35,
       gradient: {
-        0.12: '#0000ff',
-        0.32: '#00ffff',
-        0.52: '#00ff00',
-        0.72: '#ffff00',
-        0.88: '#ff7700',
-        1.00: '#ff0000',
+        0.12: "#0000ff",
+        0.32: "#00ffff",
+        0.52: "#00ff00",
+        0.72: "#ffff00",
+        0.88: "#ff7700",
+        1.0: "#ff0000",
       },
     });
 

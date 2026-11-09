@@ -1,5 +1,5 @@
-import { getIsotope } from './isotopes';
-import type { Isotope } from './types';
+import { getIsotope } from "./isotopes";
+import type { Isotope } from "./types";
 
 export interface ODEState {
   t: number;
@@ -22,13 +22,33 @@ const C4 = 4 / 5;
 const C5 = 8 / 9;
 
 const A21 = 1 / 5;
-const A31 = 3 / 40; const A32 = 9 / 40;
-const A41 = 44 / 45; const A42 = -56 / 15; const A43 = 32 / 9;
-const A51 = 19372 / 6561; const A52 = -25360 / 2187; const A53 = 64448 / 6561; const A54 = -212 / 729;
-const A61 = 9017 / 3168; const A62 = -355 / 33; const A63 = 46732 / 5247; const A64 = 49 / 176; const A65 = -5103 / 18656;
-const A71 = 35 / 384; const A72 = 0; const A73 = 500 / 1113; const A74 = 125 / 192; const A75 = -2187 / 6784; const A76 = 11 / 84;
+const A31 = 3 / 40;
+const A32 = 9 / 40;
+const A41 = 44 / 45;
+const A42 = -56 / 15;
+const A43 = 32 / 9;
+const A51 = 19372 / 6561;
+const A52 = -25360 / 2187;
+const A53 = 64448 / 6561;
+const A54 = -212 / 729;
+const A61 = 9017 / 3168;
+const A62 = -355 / 33;
+const A63 = 46732 / 5247;
+const A64 = 49 / 176;
+const A65 = -5103 / 18656;
+const A71 = 35 / 384;
+const A72 = 0;
+const A73 = 500 / 1113;
+const A74 = 125 / 192;
+const A75 = -2187 / 6784;
+const A76 = 11 / 84;
 
-const E1 = 71 / 57600; const E3 = -71 / 16695; const E4 = 71 / 1920; const E5 = -17253 / 339200; const E6 = 22 / 525; const E7 = -1 / 40;
+const E1 = 71 / 57600;
+const E3 = -71 / 16695;
+const E4 = 71 / 1920;
+const E5 = -17253 / 339200;
+const E6 = 22 / 525;
+const E7 = -1 / 40;
 
 export function rk45(
   f: DerivativeFn,
@@ -43,7 +63,7 @@ export function rk45(
     atol?: number;
     maxIterations?: number;
     recordInterval?: number;
-  }
+  },
 ): RK45Result {
   const initialStep = options?.initialStep ?? Math.min(0.01 * (tEnd - t0), 1);
   const minStep = options?.minStep ?? 1e-12;
@@ -83,11 +103,13 @@ export function rk45(
     const k4 = f(t + C4 * h, y4);
 
     const y5 = new Array(n);
-    for (let i = 0; i < n; i++) y5[i] = y[i] + h * (A51 * k1[i] + A52 * k2[i] + A53 * k3[i] + A54 * k4[i]);
+    for (let i = 0; i < n; i++)
+      y5[i] = y[i] + h * (A51 * k1[i] + A52 * k2[i] + A53 * k3[i] + A54 * k4[i]);
     const k5 = f(t + C5 * h, y5);
 
     const y6 = new Array(n);
-    for (let i = 0; i < n; i++) y6[i] = y[i] + h * (A61 * k1[i] + A62 * k2[i] + A63 * k3[i] + A64 * k4[i] + A65 * k5[i]);
+    for (let i = 0; i < n; i++)
+      y6[i] = y[i] + h * (A61 * k1[i] + A62 * k2[i] + A63 * k3[i] + A64 * k4[i] + A65 * k5[i]);
     const k6 = f(t + h, y6);
 
     const yNew = new Array(n);
@@ -97,7 +119,15 @@ export function rk45(
 
     const err = new Array(n);
     for (let i = 0; i < n; i++) {
-      err[i] = Math.abs(h * (E1 * k1[i] + E3 * k3[i] + E4 * k4[i] + E5 * k5[i] + E6 * k6[i] + E7 * (yNew[i] - y[i]) / h));
+      err[i] = Math.abs(
+        h *
+          (E1 * k1[i] +
+            E3 * k3[i] +
+            E4 * k4[i] +
+            E5 * k5[i] +
+            E6 * k6[i] +
+            (E7 * (yNew[i] - y[i])) / h),
+      );
     }
 
     const sc = new Array(n);
@@ -150,7 +180,7 @@ export interface DecayChainOptions {
 
 export function solveDecayChain(
   rootSymbol: string,
-  options: DecayChainOptions
+  options: DecayChainOptions,
 ): { chain: DecayChainResult[]; isotopes: Isotope[]; rk45: RK45Result } {
   const { totalTime, initialActivity, maxGenerations = 5 } = options;
 
@@ -171,7 +201,11 @@ export function solveDecayChain(
   collectChain(rootSymbol, 0);
 
   if (chainIsotopes.length === 0) {
-    return { chain: [], isotopes: [], rk45: { states: [], steps: 0, accepted: 0, rejected: 0, finalTime: 0 } };
+    return {
+      chain: [],
+      isotopes: [],
+      rk45: { states: [], steps: 0, accepted: 0, rejected: 0, finalTime: 0 },
+    };
   }
 
   const n = chainIsotopes.length;
@@ -233,8 +267,14 @@ export function integrateDoseOverTime(
   concentrationFn: (t: number) => number,
   doseCoefficients: { cloud: number; inhalation: number; external: number },
   totalTime: number,
-  exposureDuration: number
-): { cloudDose: number; inhalationDose: number; externalDose: number; total: number; rk45: RK45Result } {
+  exposureDuration: number,
+): {
+  cloudDose: number;
+  inhalationDose: number;
+  externalDose: number;
+  total: number;
+  rk45: RK45Result;
+} {
   const effDuration = Math.min(totalTime, exposureDuration);
   const y0 = [0, 0, 0];
 
