@@ -1,12 +1,6 @@
-import { useState, useCallback, useEffect } from "react";
-import { ISOTOPE_LIBRARY } from "./lib/isotopes";
-import { calculateDispersion, formatDose, formatActivity, formatDistance } from "./lib/dispersion";
-import type {
-  DispersionInput,
-  DispersionResult,
-  StabilityClass,
-  CalculationHistoryEntry,
-} from "./lib/types";
+import { useState, useCallback, useMemo } from "react";
+import { calculateDispersion, formatMixSummary, getTotalMixActivityBq } from "./lib/dispersion";
+import type { DispersionInput, CalculationHistoryEntry } from "./lib/types";
 import { Sidebar } from "./components/Sidebar";
 import { Dashboard } from "./components/Dashboard";
 import { PlumeModeler } from "./components/PlumeModeler";
@@ -14,30 +8,38 @@ import { IsotopeLibrary } from "./components/IsotopeLibrary";
 import { HistoryView } from "./components/HistoryView";
 import { Plume3DView } from "../renderer/simulation/plume3d";
 
+import {
+  JIZZAKH_NPP_LAT,
+  JIZZAKH_NPP_LON,
+} from "../renderer/simulation/plume3d/mapTextureGenerator";
+
 export type ViewName = "dashboard" | "modeler" | "plume3d" | "isotopes" | "history";
 
 function App() {
   const [activeView, setActiveView] = useState<ViewName>("dashboard");
-  const [result, setResult] = useState<DispersionResult | null>(null);
   const [history, setHistory] = useState<CalculationHistoryEntry[]>([]);
   const [input, setInput] = useState<DispersionInput>({
     sourceTerm: {
       isotope: "Cs-137",
-      activity: 1e14,
+      activity: 1.5e14,
+      sourceMix: [
+        { id: "mix-1", isotope: "Cs-137", activity: 100, unit: "TBq" },
+        { id: "mix-2", isotope: "I-131", activity: 50, unit: "TBq" },
+      ],
       releaseDuration: 1,
       releaseHeight: 30,
       releaseType: "stack",
       physicalForm: "aerosol",
       particleSize: 1,
-      latitude: 40.212,
-      longitude: 68.865,
+      latitude: JIZZAKH_NPP_LAT,
+      longitude: JIZZAKH_NPP_LON,
     },
     meteorology: {
       windSpeed: 5,
       windDirection: 90,
       stabilityClass: "D",
       mixingHeight: 1000,
-      temperature: 20,
+      airTemperature: 20,
       precipitationRate: 0,
       inversionHeight: 0,
     },
@@ -53,16 +55,19 @@ function App() {
     averagingTime: 3600,
   });
 
+  const result = useMemo(() => calculateDispersion(input), [input]);
+
   const runCalculation = useCallback(() => {
     const res = calculateDispersion(input);
-    setResult(res);
     setActiveView("modeler");
+    const mixLabel = formatMixSummary(input.sourceTerm);
+    const totalBq = getTotalMixActivityBq(input.sourceTerm);
     const entry: CalculationHistoryEntry = {
       id: crypto.randomUUID(),
       timestamp: new Date().toISOString(),
-      scenarioName: `${input.sourceTerm.isotope} release`,
-      isotope: input.sourceTerm.isotope,
-      activity: input.sourceTerm.activity,
+      scenarioName: `${mixLabel} release`,
+      isotope: mixLabel,
+      activity: totalBq,
       windSpeed: input.meteorology.windSpeed,
       stabilityClass: input.meteorology.stabilityClass,
       maxDose: res.maxDoseDistance.value,
@@ -70,10 +75,6 @@ function App() {
     };
     setHistory((prev) => [entry, ...prev].slice(0, 50));
   }, [input]);
-
-  useEffect(() => {
-    if (!result) runCalculation();
-  }, [result, runCalculation]);
 
   return (
     <div
@@ -99,7 +100,9 @@ function App() {
             onRunCalculation={runCalculation}
           />
         )}
-        {activeView === "plume3d" && <Plume3DView />}
+        {activeView === "plume3d" && (
+          <Plume3DView syncedInput={input} onSyncedInputChange={setInput} />
+        )}
         {activeView === "isotopes" && <IsotopeLibrary />}
         {activeView === "history" && (
           <HistoryView history={history} onClear={() => setHistory([])} />

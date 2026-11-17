@@ -10,8 +10,18 @@ import type {
   DispersionPointResult,
   Plume3DModelOutput,
   Isotope3D,
+  NuclideReleaseItem,
+  MultiNuclideDispersionResult,
+  MultiNuclideAssessmentReport,
 } from "./types";
-import { runGaussianPlume3DModel, calculatePointRadiologicalDose } from "./gaussianPlume3D";
+import {
+  runGaussianPlume3DModel,
+  calculatePointRadiologicalDose,
+  runMultiNuclideGaussianPlume3DModel,
+  calculateMultiNuclidePointDose,
+  type MultiNuclideCalcOptions,
+} from "./gaussianPlume3D";
+import { runMultiNuclideDoseAssessment, type AssessmentOptions } from "./multiNuclideAssessment";
 import { EXTENDED_ISOTOPE_LIBRARY, getExtendedIsotope } from "./isotopes";
 
 export const PLUME_IPC_CHANNELS = {
@@ -19,12 +29,16 @@ export const PLUME_IPC_CHANNELS = {
   CALCULATE_POINT_DOSE: "aura-rad:plume3d:point-dose",
   CALCULATE_SAFE_TIME: "aura-rad:plume3d:safe-stay-time",
   GET_ISOTOPE_LIBRARY: "aura-rad:plume3d:get-isotopes",
+  SIMULATE_MULTI_NUCLIDE: "aura-rad:plume3d:simulate-multi",
+  RUN_DOSE_ASSESSMENT: "aura-rad:plume3d:dose-assessment",
 } as const;
 
 export interface SimulatePlumePayload {
   source: PlumeSource3D;
   meteorology: Meteorology3D;
   isotopeSymbol?: string;
+  nuclides?: NuclideReleaseItem[];
+  options?: MultiNuclideCalcOptions;
 }
 
 export interface CalculatePointDosePayload {
@@ -74,11 +88,86 @@ export async function invokePlumeSimulation(
   }
 
   // Direct pure TypeScript calculation
+  if (payload.nuclides && payload.nuclides.length > 0) {
+    return runMultiNuclideGaussianPlume3DModel(
+      payload.source,
+      payload.meteorology,
+      payload.nuclides,
+      payload.options,
+    );
+  }
+
   const isotope = payload.isotopeSymbol
     ? getExtendedIsotope(payload.isotopeSymbol)
     : getExtendedIsotope(payload.source.isotopeSymbol);
 
   return runGaussianPlume3DModel(payload.source, payload.meteorology, isotope);
+}
+
+/**
+ * Runs full HotSpot-style Multi-Nuclide Dose Assessment via Electron IPC or local TypeScript engine.
+ */
+export async function invokeMultiNuclideAssessment(
+  source: PlumeSource3D,
+  meteorology: Meteorology3D,
+  nuclides: NuclideReleaseItem[],
+  options?: AssessmentOptions,
+): Promise<MultiNuclideAssessmentReport> {
+  const electron =
+    typeof window !== "undefined"
+      ? (
+          window as unknown as {
+            electron?: {
+              ipcRenderer?: {
+                invoke: (
+                  channel: string,
+                  ...args: unknown[]
+                ) => Promise<MultiNuclideAssessmentReport>;
+              };
+            };
+          }
+        ).electron
+      : undefined;
+
+  if (electron?.ipcRenderer) {
+    try {
+      return await electron.ipcRenderer.invoke(PLUME_IPC_CHANNELS.RUN_DOSE_ASSESSMENT, {
+        source,
+        meteorology,
+        nuclides,
+        options,
+      });
+    } catch {
+      // Fallback to local
+    }
+  }
+
+  return runMultiNuclideDoseAssessment(source, meteorology, nuclides, options);
+}
+
+/**
+ * Calculates multi-nuclide point dose rate breakdown and safe stay time.
+ */
+export async function invokeMultiNuclidePointDose(
+  source: PlumeSource3D,
+  meteorology: Meteorology3D,
+  nuclides: NuclideReleaseItem[],
+  xDownwind: number,
+  yCrosswind: number,
+  zHeight: number,
+  doseLimitMsv: number = 1.0,
+  options?: MultiNuclideCalcOptions,
+): Promise<MultiNuclideDispersionResult> {
+  return calculateMultiNuclidePointDose(
+    xDownwind,
+    yCrosswind,
+    zHeight,
+    source,
+    meteorology,
+    nuclides,
+    doseLimitMsv,
+    options,
+  );
 }
 
 /**

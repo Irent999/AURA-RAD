@@ -9,14 +9,22 @@ import type {
   ZoneBoundary3D,
   PlumeIsoline3D,
   MapStyleType,
+  NuclideReleaseItem,
 } from "./types";
-import { calculateDispersionCoefficients, calculatePointRadiologicalDose } from "./gaussianPlume3D";
-import { createGeographicMapCanvas, loadMapTextureAsync } from "./mapTextureGenerator";
+import {
+  calculateDispersionCoefficients,
+  calculatePointRadiologicalDose,
+  calculateMultiNuclidePointDose,
+} from "./gaussianPlume3D";
+import { loadMapTextureAsync, JIZZAKH_NPP_LAT, JIZZAKH_NPP_LON } from "./mapTextureGenerator";
 
 interface Plume3DCanvasProps {
   source: PlumeSource3D;
   meteorology: Meteorology3D;
   isotope: Isotope3D;
+  nuclides?: NuclideReleaseItem[];
+  groundExposureHours?: number;
+  peakCoords?: { worldX: number; worldZ: number } | null;
   probe: DosimeterProbe;
   onProbeMove: (newPos: { x: number; y: number; z: number }) => void;
   zones: ZoneBoundary3D[];
@@ -33,6 +41,11 @@ interface Plume3DCanvasProps {
 
 // Pre-allocated math helpers to ensure zero GC in the render loop
 const _colorA = new THREE.Color();
+const _colorStopSafe = new THREE.Color(0.02, 0.72, 0.85); // < 0.02 mSv/h cyan
+const _colorStopMon = new THREE.Color(0.1, 0.85, 0.5); // ~0.2 mSv/h emerald
+const _colorStopWarn = new THREE.Color(0.92, 0.68, 0.08); // ~1.5 mSv/h amber
+const _colorStopHigh = new THREE.Color(0.95, 0.28, 0.06); // ~8 mSv/h orange-red
+const _colorStopCrit = new THREE.Color(1.0, 0.06, 0.24); // >= 30 mSv/h crimson
 const _raycaster = new THREE.Raycaster();
 const _mouse = new THREE.Vector2();
 
@@ -40,6 +53,9 @@ export function Plume3DCanvas({
   source,
   meteorology,
   isotope,
+  nuclides,
+  groundExposureHours = 4,
+  peakCoords,
   probe,
   onProbeMove,
   zones,
@@ -84,6 +100,7 @@ export function Plume3DCanvas({
   const isolinesGroupRef = useRef<THREE.Group | null>(null);
   const centerlineLineRef = useRef<THREE.Line | null>(null);
   const probeMeshRef = useRef<THREE.Group | null>(null);
+  const peakMarkerRef = useRef<THREE.Group | null>(null);
   const windArrowGroupRef = useRef<THREE.Group | null>(null);
 
   // Camera animation target
@@ -102,6 +119,9 @@ export function Plume3DCanvas({
     source,
     meteorology,
     isotope,
+    nuclides,
+    groundExposureHours,
+    peakCoords,
     probe,
     mapStyle,
     showZones,
@@ -116,6 +136,9 @@ export function Plume3DCanvas({
       source,
       meteorology,
       isotope,
+      nuclides,
+      groundExposureHours,
+      peakCoords,
       probe,
       mapStyle,
       showZones,
@@ -129,6 +152,9 @@ export function Plume3DCanvas({
     source,
     meteorology,
     isotope,
+    nuclides,
+    groundExposureHours,
+    peakCoords,
     probe,
     mapStyle,
     showZones,
@@ -276,14 +302,23 @@ export function Plume3DCanvas({
 
     // 5. Embedded Realistic Geographic Map Terrain (12km x 12km)
     const groundSize = 12000;
+    let initCancelled = false;
     const initialTexture = loadMapTextureAsync(
       propsRef.current.mapStyle,
-      propsRef.current.source.latitude ?? 40.212,
-      propsRef.current.source.longitude ?? 68.865,
+      propsRef.current.source.latitude ?? JIZZAKH_NPP_LAT,
+      propsRef.current.source.longitude ?? JIZZAKH_NPP_LON,
       groundSize,
       undefined,
       (tex) => {
+        if (initCancelled) {
+          if (tex !== currentTextureRef.current) tex.dispose();
+          return;
+        }
         if (groundMatRef.current) {
+          if (currentTextureRef.current && currentTextureRef.current !== tex) {
+            currentTextureRef.current.dispose();
+          }
+          currentTextureRef.current = tex;
           groundMatRef.current.map = tex;
           groundMatRef.current.needsUpdate = true;
         }
@@ -563,6 +598,40 @@ export function Plume3DCanvas({
     scene.add(probeGroup);
     probeMeshRef.current = probeGroup;
 
+    // 11b. Peak Dose Coordinate Marker (X_max, Y_max)
+    const peakGroup = new THREE.Group();
+    const peakRingGeo = new THREE.RingGeometry(18, 25, 32);
+    const peakRingMat = new THREE.MeshBasicMaterial({
+      color: "#f43f5e",
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.75,
+    });
+    const peakRing = new THREE.Mesh(peakRingGeo, peakRingMat);
+    peakRing.rotation.x = -Math.PI / 2;
+    peakRing.position.y = 0.6;
+    peakGroup.add(peakRing);
+
+    const peakPoleGeo = new THREE.CylinderGeometry(1.0, 1.0, 26, 8);
+    const peakPoleMat = new THREE.MeshBasicMaterial({
+      color: "#f43f5e",
+      transparent: true,
+      opacity: 0.7,
+    });
+    const peakPole = new THREE.Mesh(peakPoleGeo, peakPoleMat);
+    peakPole.position.y = 13;
+    peakGroup.add(peakPole);
+
+    const peakDiamondGeo = new THREE.OctahedronGeometry(7, 0);
+    const peakDiamondMat = new THREE.MeshBasicMaterial({ color: "#fb7185" });
+    const peakDiamond = new THREE.Mesh(peakDiamondGeo, peakDiamondMat);
+    peakDiamond.position.y = 28;
+    peakGroup.add(peakDiamond);
+
+    peakGroup.visible = false;
+    scene.add(peakGroup);
+    peakMarkerRef.current = peakGroup;
+
     // Interactive pointer placement for the sensor probe (Shift + Click on terrain)
     const onPointerDown = (event: MouseEvent) => {
       if (event.button !== 0 || !event.shiftKey) return;
@@ -579,16 +648,19 @@ export function Plume3DCanvas({
     };
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
 
-    // Resize Handler
+    // Resize Handler + ResizeObserver for embedded tab container transitions
     const handleResize = () => {
       if (!container || !rendererRef.current || !cameraRef.current) return;
       const w = container.clientWidth;
       const h = container.clientHeight;
+      if (w <= 0 || h <= 0) return;
       cameraRef.current.aspect = w / h;
       cameraRef.current.updateProjectionMatrix();
       rendererRef.current.setSize(w, h);
     };
     window.addEventListener("resize", handleResize);
+    const resizeObserver = new ResizeObserver(handleResize);
+    resizeObserver.observe(container);
 
     // 12. Main Render & Physics Simulation Loop
     let animationFrameId = 0;
@@ -634,6 +706,18 @@ export function Plume3DCanvas({
       // Update probe position in 3D
       if (probeMeshRef.current) {
         probeMeshRef.current.position.set(curProbe.x, 0, curProbe.y);
+      }
+
+      // Update peak marker in 3D
+      if (peakMarkerRef.current) {
+        const pk = propsRef.current.peakCoords;
+        if (pk) {
+          peakMarkerRef.current.visible = true;
+          peakMarkerRef.current.position.set(pk.worldX, 0, pk.worldZ);
+          peakMarkerRef.current.rotation.y = now * 0.0012;
+        } else {
+          peakMarkerRef.current.visible = false;
+        }
       }
 
       // Visibility toggles
@@ -707,28 +791,42 @@ export function Plume3DCanvas({
 
           posAttr.setXYZ(i, wx, wy, wz);
 
-          // Radiological hazard color ramp based on total dose rate / H*(10)
-          const ptDose = calculatePointRadiologicalDose(
-            xDownwind,
-            yCrosswind,
-            zElev,
-            src,
-            met,
-            iso,
-            1.0,
-          );
+          // Continuous log10 hazard color ramp calibrated to additive mixture dose rate H*(10)
+          const nuclidesList = propsRef.current.nuclides;
+          const dose =
+            nuclidesList && nuclidesList.length > 0
+              ? calculateMultiNuclidePointDose(
+                  xDownwind,
+                  yCrosswind,
+                  zElev,
+                  src,
+                  met,
+                  nuclidesList,
+                  1.0,
+                  {
+                    fastMode: true,
+                    groundExposureHours: propsRef.current.groundExposureHours,
+                  },
+                ).totalDoseRate
+              : calculatePointRadiologicalDose(xDownwind, yCrosswind, zElev, src, met, iso, 1.0)
+                  .totalDoseRate;
 
-          const dose = ptDose.totalDoseRate;
-          if (dose > 20) {
-            _colorA.setRGB(1.0, 0.05, 0.2); // Core hazard magenta-red
-          } else if (dose > 5.0) {
-            _colorA.setRGB(0.95, 0.25, 0.05); // High danger orange-red
-          } else if (dose > 1.0) {
-            _colorA.setRGB(0.92, 0.65, 0.08); // Evacuation zone amber-yellow
-          } else if (dose > 0.1) {
-            _colorA.setRGB(0.1, 0.85, 0.5); // Monitoring zone green
+          if (dose <= 0.02) {
+            _colorA.copy(_colorStopSafe);
+          } else if (dose <= 0.2) {
+            const t = (Math.log10(dose) - Math.log10(0.02)) / (Math.log10(0.2) - Math.log10(0.02));
+            _colorA.copy(_colorStopSafe).lerp(_colorStopMon, t);
+          } else if (dose <= 1.5) {
+            const t = (Math.log10(dose) - Math.log10(0.2)) / (Math.log10(1.5) - Math.log10(0.2));
+            _colorA.copy(_colorStopMon).lerp(_colorStopWarn, t);
+          } else if (dose <= 8.0) {
+            const t = (Math.log10(dose) - Math.log10(1.5)) / (Math.log10(8.0) - Math.log10(1.5));
+            _colorA.copy(_colorStopWarn).lerp(_colorStopHigh, t);
+          } else if (dose <= 30.0) {
+            const t = (Math.log10(dose) - Math.log10(8.0)) / (Math.log10(30.0) - Math.log10(8.0));
+            _colorA.copy(_colorStopHigh).lerp(_colorStopCrit, t);
           } else {
-            _colorA.setRGB(0.02, 0.7, 0.85); // Safe background cyan
+            _colorA.copy(_colorStopCrit);
           }
 
           colAttr.setXYZ(i, _colorA.r, _colorA.g, _colorA.b);
@@ -749,7 +847,9 @@ export function Plume3DCanvas({
     animationFrameId = requestAnimationFrame(tick);
 
     return () => {
+      initCancelled = true;
       cancelAnimationFrame(animationFrameId);
+      resizeObserver.disconnect();
       window.removeEventListener("resize", handleResize);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.dispose();
@@ -762,13 +862,18 @@ export function Plume3DCanvas({
   // Update Geographic Map Texture when mapStyle or source coordinates change
   useEffect(() => {
     if (!groundMatRef.current) return;
+    let cancelled = false;
     const newTexture = loadMapTextureAsync(
       mapStyle,
-      source.latitude ?? 40.212,
-      source.longitude ?? 68.865,
+      source.latitude ?? JIZZAKH_NPP_LAT,
+      source.longitude ?? JIZZAKH_NPP_LON,
       12000,
       undefined,
       (loadedTex) => {
+        if (cancelled) {
+          if (loadedTex !== currentTextureRef.current) loadedTex.dispose();
+          return;
+        }
         if (!groundMatRef.current) return;
         if (currentTextureRef.current && currentTextureRef.current !== loadedTex) {
           currentTextureRef.current.dispose();
@@ -787,6 +892,9 @@ export function Plume3DCanvas({
     currentTextureRef.current = newTexture;
     groundMatRef.current.map = newTexture;
     groundMatRef.current.needsUpdate = true;
+    return () => {
+      cancelled = true;
+    };
   }, [mapStyle, source.latitude, source.longitude]);
 
   // Update Protective Action Zones geometries on ground map

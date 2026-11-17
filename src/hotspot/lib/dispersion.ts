@@ -1,8 +1,13 @@
 import type {
+  ActivityUnit,
   DispersionInput,
   DispersionResult,
   DoseResult,
+  IsodoseContour2D,
+  NuclideDistanceContribution,
   ProtectiveAction,
+  SourceMixItem,
+  SourceTerm,
   StabilityClass,
 } from "./types";
 import { getIsotope } from "./isotopes";
@@ -20,6 +25,47 @@ import { solveDecayChain, type DecayChainResult } from "./rk45";
 
 const BREATHING_RATE = 3.3e-4; // m^3/s (ICRP adult, light activity)
 const EARTH_RADIUS_M = 6371000;
+
+export function convertActivityToBq(activity: number, unit: ActivityUnit): number {
+  const safe = Number.isFinite(activity) ? Math.max(activity, 0) : 0;
+  if (unit === "TBq") return safe * 1e12;
+  if (unit === "Ci") return safe * 3.7e10;
+  return safe;
+}
+
+export interface NormalizedMixItem extends SourceMixItem {
+  activityBq: number;
+}
+
+export function getNormalizedSourceMix(sourceTerm: SourceTerm): NormalizedMixItem[] {
+  if (sourceTerm.sourceMix && sourceTerm.sourceMix.length > 0) {
+    return sourceTerm.sourceMix.map((item) => ({
+      ...item,
+      activityBq: convertActivityToBq(item.activity, item.unit),
+    }));
+  }
+  return [
+    {
+      id: "primary",
+      isotope: sourceTerm.isotope,
+      activity: sourceTerm.activity,
+      unit: "Bq",
+      activityBq: Math.max(sourceTerm.activity, 0),
+    },
+  ];
+}
+
+export function getTotalMixActivityBq(sourceTerm: SourceTerm): number {
+  return getNormalizedSourceMix(sourceTerm).reduce((sum, item) => sum + item.activityBq, 0);
+}
+
+export function formatMixSummary(sourceTerm: SourceTerm): string {
+  const mix = getNormalizedSourceMix(sourceTerm);
+  if (mix.length === 0) return sourceTerm.isotope;
+  if (mix.length === 1) return mix[0].isotope;
+  if (mix.length === 2) return `${mix[0].isotope} + ${mix[1].isotope}`;
+  return `${mix[0].isotope} + ${mix.length - 1} more`;
+}
 
 // Martin (1976) Pasquill-Gifford power-law fits
 type PGCoefficients = {
@@ -122,31 +168,28 @@ function calculateEffectiveReleaseHeight(input: DispersionInput): number {
   return Math.max(h0 + deltaH, 0);
 }
 
-export function computeCenterlineConcentration(
+function computeIsotopeCenterlineConcentration(
   input: DispersionInput,
   distance: number,
-): { concentration: number; sy: number; sz: number } {
+  isotopeSymbol: string,
+  activityBq: number,
+  sy: number,
+  sz: number,
+  effHeight: number,
+): number {
   const { sourceTerm, meteorology, terrain } = input;
+  const isotope = getIsotope(isotopeSymbol);
+  if (!isotope || activityBq <= 0) return 0;
+
   const isCalm = meteorology.windSpeed < 0.5;
-
-  const effHeight = calculateEffectiveReleaseHeight(input);
-  const isotope = getIsotope(sourceTerm.isotope);
-
-  const { sy, sz } = isCalm
-    ? { sy: Math.max(distance * 0.35, 15), sz: Math.max(distance * 0.25, 10) }
-    : dispersionCoefficients(meteorology.stabilityClass, distance, terrain.terrainType);
-
-  if (!isotope || sourceTerm.activity <= 0) return { concentration: 0, sy, sz };
-
   const durationSec = Math.max(sourceTerm.releaseDuration, 1e-6) * 3600;
-  const Q0 = sourceTerm.activity / durationSec;
+  const Q0 = activityBq / durationSec;
 
   if (isCalm) {
     const R = Math.max(distance, 1);
     const volume = (4 / 3) * Math.PI * Math.pow(R, 3);
-    const concentration =
-      (sourceTerm.activity / volume) * Math.exp(-isotope.decayConstant * (R / 0.5));
-    return { concentration: Math.max(concentration, 0), sy: R, sz: R };
+    const concentration = (activityBq / volume) * Math.exp(-isotope.decayConstant * (R / 0.5));
+    return Math.max(concentration, 0);
   }
 
   const wind = Math.max(
@@ -170,7 +213,7 @@ export function computeCenterlineConcentration(
     concentration = (Q / (2 * Math.PI * sy * sz * wind)) * vertical;
   }
 
-  return { concentration: Math.max(concentration, 0), sy, sz };
+  return Math.max(concentration, 0);
 }
 
 function depositionVelocity(form: string): number {
@@ -183,10 +226,7 @@ function isIodine(symbol: string): boolean {
   return /^I-\d+/i.test(symbol);
 }
 
-function computeDoses(
-  concentration: number,
-  input: DispersionInput,
-): {
+interface PathwayDoses {
   plumeDeposition: number;
   externalDose: number;
   cloudDose: number;
@@ -196,9 +236,15 @@ function computeDoses(
   ingestionEquivalentDose: number;
   totalEffectiveDose: number;
   thyroidDose: number;
-} {
+}
+
+function computeIsotopeDoses(
+  concentration: number,
+  input: DispersionInput,
+  isotopeSymbol: string,
+): PathwayDoses {
   const { sourceTerm } = input;
-  const isotope = getIsotope(sourceTerm.isotope);
+  const isotope = getIsotope(isotopeSymbol);
   if (!isotope || concentration <= 0) {
     return {
       plumeDeposition: 0,
@@ -226,7 +272,7 @@ function computeDoses(
   const plumeDeposition =
     concentration * depositionVelocity(sourceTerm.physicalForm) * exposureDuration;
 
-  // Доза от подстилающей поверхности (исправлено умножение на время)
+  // Доза от подстилающей поверхности
   const groundShineDoseSv = plumeDeposition * isotope.externalDoseCoefficient;
 
   // Эквивалентная доза на кожу
@@ -251,11 +297,98 @@ function computeDoses(
   };
 }
 
+export function computeMixtureAtDistance(
+  input: DispersionInput,
+  distance: number,
+): {
+  concentration: number;
+  sy: number;
+  sz: number;
+  doses: PathwayDoses;
+  nuclideBreakdown: NuclideDistanceContribution[];
+} {
+  const { meteorology, terrain, sourceTerm } = input;
+  const isCalm = meteorology.windSpeed < 0.5;
+  const effHeight = calculateEffectiveReleaseHeight(input);
+
+  const { sy, sz } = isCalm
+    ? { sy: Math.max(distance, 1), sz: Math.max(distance, 1) }
+    : dispersionCoefficients(meteorology.stabilityClass, distance, terrain.terrainType);
+
+  const mix = getNormalizedSourceMix(sourceTerm);
+
+  const totalDoses: PathwayDoses = {
+    plumeDeposition: 0,
+    externalDose: 0,
+    cloudDose: 0,
+    groundDose: 0,
+    inhalationDose: 0,
+    skinDose: 0,
+    ingestionEquivalentDose: 0,
+    totalEffectiveDose: 0,
+    thyroidDose: 0,
+  };
+  let totalConcentration = 0;
+  const nuclideBreakdown: NuclideDistanceContribution[] = [];
+
+  for (const item of mix) {
+    const conc = computeIsotopeCenterlineConcentration(
+      input,
+      distance,
+      item.isotope,
+      item.activityBq,
+      sy,
+      sz,
+      effHeight,
+    );
+    const isoDoses = computeIsotopeDoses(conc, input, item.isotope);
+    const isoMeta = getIsotope(item.isotope);
+
+    totalConcentration += conc;
+    totalDoses.plumeDeposition += isoDoses.plumeDeposition;
+    totalDoses.externalDose += isoDoses.externalDose;
+    totalDoses.cloudDose += isoDoses.cloudDose;
+    totalDoses.groundDose += isoDoses.groundDose;
+    totalDoses.inhalationDose += isoDoses.inhalationDose;
+    totalDoses.skinDose += isoDoses.skinDose;
+    totalDoses.ingestionEquivalentDose += isoDoses.ingestionEquivalentDose;
+    totalDoses.totalEffectiveDose += isoDoses.totalEffectiveDose;
+    totalDoses.thyroidDose += isoDoses.thyroidDose;
+
+    nuclideBreakdown.push({
+      id: item.id,
+      isotope: item.isotope,
+      name: isoMeta?.name ?? item.isotope,
+      activityBq: item.activityBq,
+      concentration: conc,
+      ...isoDoses,
+    });
+  }
+
+  return {
+    concentration: totalConcentration,
+    sy,
+    sz,
+    doses: totalDoses,
+    nuclideBreakdown,
+  };
+}
+
+export function computeCenterlineConcentration(
+  input: DispersionInput,
+  distance: number,
+): { concentration: number; sy: number; sz: number } {
+  const { concentration, sy, sz } = computeMixtureAtDistance(input, distance);
+  return { concentration, sy, sz };
+}
+
 function determineProtectiveActions(
   results: DoseResult[],
-  isotopeSymbol: string,
+  sourceTerm: SourceTerm,
 ): ProtectiveAction[] {
-  const iodineRelease = isIodine(isotopeSymbol);
+  const iodineRelease = getNormalizedSourceMix(sourceTerm).some(
+    (item) => item.activityBq > 0 && isIodine(item.isotope),
+  );
   const actions: ProtectiveAction[] = [];
 
   for (const r of results) {
@@ -320,11 +453,25 @@ export function generatePlumeFootprint(
   const footprint: { x: number; y: number; concentration: number; dose: number }[] = [];
   const { meteorology } = input;
   const isCalm = meteorology.windSpeed < 0.5;
+  // Standard compass azimuth: 0° = North (+Y), 90° = East (+X), 180° = South (-Y), 270° = West (-X)
   const windRad = (meteorology.windDirection * Math.PI) / 180;
+  const dwX = Math.sin(windRad);
+  const dwY = Math.cos(windRad);
+  const cwX = Math.cos(windRad);
+  const cwY = -Math.sin(windRad);
 
-  for (const d of distances) {
-    const { concentration, sy } = computeCenterlineConcentration(input, d);
-    const dummyDoses = computeDoses(concentration, input);
+  const fineSet = new Set<number>(distances);
+  const maxD = Math.max(...distances, 5000);
+  for (const step of [
+    50, 100, 150, 250, 400, 600, 800, 1000, 1500, 2000, 3000, 5000, 8000, 12000, 20000, 35000,
+    50000,
+  ]) {
+    if (step <= maxD * 1.05) fineSet.add(step);
+  }
+  const sampleDistances = Array.from(fineSet).sort((a, b) => a - b);
+
+  for (const d of sampleDistances) {
+    const { concentration, sy, doses } = computeMixtureAtDistance(input, d);
 
     if (isCalm) {
       const numPoints = 16;
@@ -334,7 +481,7 @@ export function generatePlumeFootprint(
           x: d * Math.cos(angle),
           y: d * Math.sin(angle),
           concentration,
-          dose: dummyDoses.totalEffectiveDose,
+          dose: doses.totalEffectiveDose,
         });
       }
     } else {
@@ -343,10 +490,10 @@ export function generatePlumeFootprint(
         const crosswind = off * sy;
         const concFactor = Math.exp(-(crosswind * crosswind) / (2 * sy * sy));
         const conc = concentration * concFactor;
-        const pointDose = dummyDoses.totalEffectiveDose * concFactor;
+        const pointDose = doses.totalEffectiveDose * concFactor;
 
-        const x = d * Math.cos(windRad) - crosswind * Math.sin(windRad);
-        const y = d * Math.sin(windRad) + crosswind * Math.cos(windRad);
+        const x = d * dwX + crosswind * cwX;
+        const y = d * dwY + crosswind * cwY;
 
         footprint.push({ x, y, concentration: conc, dose: pointDose });
       }
@@ -379,6 +526,111 @@ function generateGeoFootprint(
   });
 }
 
+function generateGeoIsodoseContours(input: DispersionInput): {
+  contours: IsodoseContour2D[];
+  zoneSummary: {
+    exclusionZone: number;
+    contaminationZone: number;
+    ingestionZone: number;
+  };
+} {
+  const lat0 = input.sourceTerm.latitude;
+  const lon0 = input.sourceTerm.longitude;
+  const isCalm = input.meteorology.windSpeed < 0.5;
+  const windRad = (input.meteorology.windDirection * Math.PI) / 180;
+  const dwX = Math.sin(windRad);
+  const dwY = Math.cos(windRad);
+  const cwX = Math.cos(windRad);
+  const cwY = -Math.sin(windRad);
+
+  const scanDistances: number[] = [];
+  for (let d = 25; d <= 300; d += 25) scanDistances.push(d);
+  for (let d = 350; d <= 1500; d += 50) scanDistances.push(d);
+  for (let d = 1750; d <= 5000; d += 250) scanDistances.push(d);
+  for (let d = 6000; d <= 15000; d += 1000) scanDistances.push(d);
+  for (let d = 20000; d <= 50000; d += 2500) scanDistances.push(d);
+
+  let exclusionZone = 0;
+  let contaminationZone = 0;
+  let ingestionZone = 0;
+
+  const sampled = scanDistances.map((d) => {
+    const { sy, doses } = computeMixtureAtDistance(input, d);
+    const doseMsv = doses.totalEffectiveDose * 1000;
+    if (doseMsv >= 100 && d > exclusionZone) exclusionZone = d;
+    if (doseMsv >= 10 && d > contaminationZone) contaminationZone = d;
+    if (doseMsv >= 1 && d > ingestionZone) ingestionZone = d;
+    return { d, sy, doseMsv };
+  });
+
+  const thresholds = [
+    { thresholdMsv: 0.1, label: "0.1 мЗв (Зона наблюдения)", color: "#06b6d4" },
+    { thresholdMsv: 1, label: "1 мЗв (Ограничение потребления)", color: "#eab308" },
+    { thresholdMsv: 10, label: "10 мЗв (Зона контроля)", color: "#f97316" },
+    { thresholdMsv: 100, label: "100 мЗв (Экстренная эвакуация)", color: "#ef4444" },
+  ];
+
+  const contours: IsodoseContour2D[] = [];
+
+  for (const th of thresholds) {
+    if (isCalm) {
+      let maxR = 0;
+      for (const s of sampled) {
+        if (s.doseMsv >= th.thresholdMsv) maxR = s.d;
+      }
+      if (maxR > 0) {
+        const pts: { lat: number; lon: number }[] = [];
+        const N = 36;
+        for (let i = 0; i < N; i++) {
+          const angle = (i / N) * 2 * Math.PI;
+          pts.push(metersToLatLon(lat0, lon0, maxR * Math.cos(angle), maxR * Math.sin(angle)));
+        }
+        contours.push({
+          thresholdMsv: th.thresholdMsv,
+          label: th.label,
+          color: th.color,
+          points: pts,
+        });
+      }
+      continue;
+    }
+
+    const forward: { lat: number; lon: number }[] = [];
+    const backward: { lat: number; lon: number }[] = [];
+
+    for (const s of sampled) {
+      if (s.doseMsv >= th.thresholdMsv) {
+        const ratio = Math.max(1.0001, s.doseMsv / th.thresholdMsv);
+        const yCross = s.sy * Math.sqrt(2 * Math.log(ratio));
+
+        const right = metersToLatLon(
+          lat0,
+          lon0,
+          s.d * dwX + yCross * cwX,
+          s.d * dwY + yCross * cwY,
+        );
+        const left = metersToLatLon(lat0, lon0, s.d * dwX - yCross * cwX, s.d * dwY - yCross * cwY);
+        forward.push(right);
+        backward.unshift(left);
+      }
+    }
+
+    if (forward.length >= 2) {
+      contours.push({
+        thresholdMsv: th.thresholdMsv,
+        label: th.label,
+        color: th.color,
+        points: [...forward, ...backward],
+      });
+    }
+  }
+
+  return {
+    contours,
+    zoneSummary: { exclusionZone, contaminationZone, ingestionZone },
+  };
+}
+
 export function calculateDispersion(input: DispersionInput): DispersionResult {
   const results: DoseResult[] = [];
   const warnings: string[] = [];
@@ -397,8 +649,10 @@ export function calculateDispersion(input: DispersionInput): DispersionResult {
   }
 
   for (const distance of input.distances) {
-    const { concentration, sy, sz } = computeCenterlineConcentration(input, distance);
-    const doses = computeDoses(concentration, input);
+    const { concentration, sy, sz, doses, nuclideBreakdown } = computeMixtureAtDistance(
+      input,
+      distance,
+    );
     const wind = Math.max(input.meteorology.windSpeed, 0.5);
     const arrivalSeconds = distance / wind;
 
@@ -415,6 +669,7 @@ export function calculateDispersion(input: DispersionInput): DispersionResult {
         input.sourceTerm.releaseDuration * 3600,
       ),
       ...doses,
+      nuclideBreakdown,
     });
   }
 
@@ -434,9 +689,11 @@ export function calculateDispersion(input: DispersionInput): DispersionResult {
     { distance: 0, value: 0 },
   );
 
-  let exclusionZone = 0;
-  let contaminationZone = 0;
-  let ingestionZone = 0;
+  const { contours: isodoseContours, zoneSummary: fineZones } = generateGeoIsodoseContours(input);
+
+  let exclusionZone = fineZones.exclusionZone;
+  let contaminationZone = fineZones.contaminationZone;
+  let ingestionZone = fineZones.ingestionZone;
   for (const r of results) {
     if (r.totalEffectiveDose >= 0.1 && r.distance > exclusionZone) exclusionZone = r.distance;
     if (r.totalEffectiveDose >= 0.01 && r.distance > contaminationZone)
@@ -444,14 +701,20 @@ export function calculateDispersion(input: DispersionInput): DispersionResult {
     if (r.totalEffectiveDose >= 0.001 && r.distance > ingestionZone) ingestionZone = r.distance;
   }
 
-  const protectiveActions = determineProtectiveActions(results, input.sourceTerm.isotope);
+  const protectiveActions = determineProtectiveActions(results, input.sourceTerm);
   const plumeFootprint = generatePlumeFootprint(input, input.distances);
   const geoFootprint = generateGeoFootprint(input, plumeFootprint);
 
+  const normalizedMix = getNormalizedSourceMix(input.sourceTerm);
+  const dominantItem = normalizedMix.reduce(
+    (best, cur) => (cur.activityBq > best.activityBq ? cur : best),
+    normalizedMix[0],
+  );
+
   const releaseDurationSec = input.sourceTerm.releaseDuration * 3600;
-  const decayChain = solveDecayChain(input.sourceTerm.isotope, {
+  const decayChain = solveDecayChain(dominantItem.isotope, {
     totalTime: releaseDurationSec,
-    initialActivity: input.sourceTerm.activity,
+    initialActivity: dominantItem.activityBq,
     maxGenerations: 5,
   });
   const decayChainResult: DecayChainResult[] = decayChain.chain;
@@ -470,6 +733,7 @@ export function calculateDispersion(input: DispersionInput): DispersionResult {
     maxDoseDistance: maxDose,
     plumeFootprint,
     geoFootprint,
+    isodoseContours,
     decayChainResult,
     rk45Stats,
     zoneSummary: {
