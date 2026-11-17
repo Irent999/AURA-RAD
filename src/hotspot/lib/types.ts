@@ -2,6 +2,14 @@ export type StabilityClass = "A" | "B" | "C" | "D" | "E" | "F";
 export type ReleaseType = "ground" | "elevated" | "stack";
 export type DoseUnit = "Sv" | "rem" | "Gy" | "rad";
 export type DistanceUnit = "m" | "km";
+export type ActivityUnit = "Bq" | "TBq" | "Ci";
+
+export interface SourceMixItem {
+  id: string;
+  isotope: string;
+  activity: number;
+  unit: ActivityUnit;
+}
 
 export interface DecayDaughter {
   symbol: string;
@@ -32,6 +40,7 @@ export interface Isotope {
 export interface SourceTerm {
   isotope: string;
   activity: number;
+  sourceMix?: SourceMixItem[];
   releaseDuration: number;
   releaseHeight: number;
   releaseType: ReleaseType;
@@ -69,6 +78,23 @@ export interface DispersionInput {
   averagingTime: number;
 }
 
+export interface NuclideDistanceContribution {
+  id: string;
+  isotope: string;
+  name: string;
+  activityBq: number;
+  concentration: number;
+  plumeDeposition: number;
+  externalDose: number;
+  cloudDose: number;
+  groundDose: number;
+  inhalationDose: number;
+  skinDose: number;
+  ingestionEquivalentDose: number;
+  totalEffectiveDose: number;
+  thyroidDose: number;
+}
+
 export interface DoseResult {
   distance: number;
   centerlineConcentration: number;
@@ -87,6 +113,14 @@ export interface DoseResult {
   ingestionEquivalentDose: number;
   totalEffectiveDose: number;
   thyroidDose: number;
+  nuclideBreakdown?: NuclideDistanceContribution[];
+}
+
+export interface IsodoseContour2D {
+  thresholdMsv: number;
+  label: string;
+  color: string;
+  points: { lat: number; lon: number }[];
 }
 
 export interface DispersionResult {
@@ -94,8 +128,9 @@ export interface DispersionResult {
   input: DispersionInput;
   maxConcentration: { distance: number; value: number };
   maxDoseDistance: { distance: number; value: number };
-  plumeFootprint: { x: number; y: number; concentration: number }[];
-  geoFootprint: { lat: number; lon: number; concentration: number }[];
+  plumeFootprint: { x: number; y: number; concentration: number; dose?: number }[];
+  geoFootprint: { lat: number; lon: number; concentration: number; dose?: number }[];
+  isodoseContours?: IsodoseContour2D[];
   decayChainResult: { time: number; activities: { symbol: string; activity: number }[] }[];
   rk45Stats: { steps: number; accepted: number; rejected: number; finalTime: number };
   zoneSummary: {

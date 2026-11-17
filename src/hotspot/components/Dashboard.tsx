@@ -12,7 +12,13 @@ import {
 } from "lucide-react";
 import type { DispersionInput, DispersionResult, CalculationHistoryEntry } from "../lib/types";
 import type { ViewName } from "../App";
-import { formatDose, formatActivity, formatDistance } from "../lib/dispersion";
+import {
+  formatDose,
+  formatActivity,
+  formatDistance,
+  formatMixSummary,
+  getTotalMixActivityBq,
+} from "../lib/dispersion";
 import { getIsotope } from "../lib/isotopes";
 
 interface DashboardProps {
@@ -31,11 +37,13 @@ export function Dashboard({
   history,
 }: DashboardProps) {
   const isotope = getIsotope(input.sourceTerm.isotope);
+  const totalMixBq = getTotalMixActivityBq(input.sourceTerm);
+  const mixSummary = formatMixSummary(input.sourceTerm);
 
   const stats = [
     {
       label: "Source Activity",
-      value: formatActivity(input.sourceTerm.activity),
+      value: formatActivity(totalMixBq),
       icon: Activity,
       color: "var(--accent)",
     },
@@ -52,8 +60,8 @@ export function Dashboard({
       color: "var(--success)",
     },
     {
-      label: "Isotope",
-      value: input.sourceTerm.isotope,
+      label: "Source Mix",
+      value: mixSummary,
       icon: Radiation,
       color: "var(--warning)",
     },

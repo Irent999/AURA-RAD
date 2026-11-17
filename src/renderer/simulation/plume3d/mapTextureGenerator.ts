@@ -2,6 +2,9 @@ import * as THREE from "three";
 
 export type MapStyleType = "satellite" | "topographic" | "tactical" | "osm";
 
+export const JIZZAKH_NPP_LAT = 40.7084;
+export const JIZZAKH_NPP_LON = 67.1584;
+
 export interface MapBoundsInfo {
   centerLat: number;
   centerLon: number;
@@ -14,12 +17,12 @@ export interface MapBoundsInfo {
  * Procedural Realistic Geographic Map Texture Generator
  * Generates calibrated 2048x2048 geographic textures with strict 1:1 metric scale (12km x 12km)
  * centered at the release point (lat0, lon0).
- * Conforms to Three.js zero-404 directive: 100% self-contained procedural rendering.
+ * Conforms to Three.js zero-404 directive: 100% self-contained procedural rendering + async Web Mercator tiles.
  */
 export function createGeographicMapCanvas(
   style: MapStyleType,
-  centerLat: number = 40.212,
-  centerLon: number = 68.865,
+  centerLat: number = JIZZAKH_NPP_LAT,
+  centerLon: number = JIZZAKH_NPP_LON,
   sizeMeters: number = 12000,
 ): { canvas: HTMLCanvasElement; texture: THREE.CanvasTexture } {
   const size = 2048;
@@ -256,15 +259,10 @@ function renderSatelliteMap(
     ctx.stroke();
   });
 
-  // 4. Populated Settlements / Villages
-  // Settlement 1: "Пос. Заречье" (Zarechye) at X = -3200m, Z = -2200m (~3.8 km)
-  renderSettlement(ctx, toPx(-3200), toPy(-2200), 180, 130, "Пос. Заречье (3.8 км)");
-
-  // Settlement 2: "Пос. Энергетик" (Energetik) at X = 2600m, Z = 2400m (~3.5 km)
-  renderSettlement(ctx, toPx(2600), toPy(2400), 220, 160, "Пос. Энергетик (3.5 км)");
-
-  // Settlement 3: "Дер. Сосново" (Sosnovo) at X = -4200m, Z = 3000m (~5.1 km)
-  renderSettlement(ctx, toPx(-4200), toPy(3000), 140, 110, "Дер. Сосново (5.1 км)");
+  // 4. Populated Settlements / Regional Reference Points (Forish / Tuzkan)
+  renderSettlement(ctx, toPx(-3200), toPy(-2200), 180, 130, "Оз. Тузкан (3.8 км)");
+  renderSettlement(ctx, toPx(2600), toPy(2400), 220, 160, "Фориш р-н (3.5 км)");
+  renderSettlement(ctx, toPx(-4200), toPy(3000), 140, 110, "Богдан (5.1 км)");
 
   // 5. Nuclear Power Plant / Nuclear Complex Site Footprint at Center (0, 0)
   const siteHalfM = 400; // 800m x 800m protected site
@@ -313,7 +311,7 @@ function renderSatelliteMap(
   ctx.font = "bold 16px Inter, sans-serif";
   ctx.fillStyle = "#ffffff";
   ctx.textAlign = "center";
-  ctx.fillText("АЭС / ЭПИЦЕНТР ВЫБРОСА", toPx(0), toPy(260));
+  ctx.fillText("АЭС ДЖИЗАК / ЭПИЦЕНТР", toPx(0), toPy(260));
 
   // 6. Calibrated Coordinate & Metric Grid Overlay
   renderCartographicGrid(ctx, size, centerLat, centerLon, sizeMeters, toPx, toPy);
@@ -376,8 +374,8 @@ function renderTopographicMap(
   ctx.stroke();
 
   // Settlements
-  renderSettlement(ctx, toPx(-3200), toPy(-2200), 160, 110, "Заречье");
-  renderSettlement(ctx, toPx(2600), toPy(2400), 190, 140, "Энергетик");
+  renderSettlement(ctx, toPx(-3200), toPy(-2200), 160, 110, "Оз. Тузкан");
+  renderSettlement(ctx, toPx(2600), toPy(2400), 190, 140, "Фориш");
 
   // Plant outline
   ctx.fillStyle = "#374151";
@@ -631,9 +629,9 @@ function renderOsmMap(
   ctx.stroke();
 
   // Settlements
-  renderSettlement(ctx, toPx(-3200), toPy(-2200), 160, 110, "Заречье");
-  renderSettlement(ctx, toPx(2600), toPy(2400), 190, 140, "Энергетик");
-  renderSettlement(ctx, toPx(3800), toPy(-1200), 150, 95, "Сосново");
+  renderSettlement(ctx, toPx(-3200), toPy(-2200), 160, 110, "Оз. Тузкан");
+  renderSettlement(ctx, toPx(2600), toPy(2400), 190, 140, "Фориш");
+  renderSettlement(ctx, toPx(3800), toPy(-1200), 150, 95, "Богдан");
 
   // Reactor perimeter boundary
   ctx.fillStyle = "#94a3b8";
@@ -646,7 +644,7 @@ function renderOsmMap(
   ctx.font = "bold 15px Inter, sans-serif";
   ctx.fillStyle = "#0f172a";
   ctx.textAlign = "center";
-  ctx.fillText("АЭС / ИСТОЧНИК ВЫБРОСА", toPx(0), toPy(240));
+  ctx.fillText("АЭС ДЖИЗАК / ЭПИЦЕНТР", toPx(0), toPy(240));
 
   renderCartographicGrid(ctx, size, centerLat, centerLon, sizeMeters, toPx, toPy);
 }
@@ -702,14 +700,177 @@ export function createFallbackGridTexture(sizeMeters: number = 12000): THREE.Can
   return tex;
 }
 
+function lonToTileX(lon: number, zoom: number): number {
+  return ((lon + 180) / 360) * Math.pow(2, zoom);
+}
+
+function latToTileY(lat: number, zoom: number): number {
+  const rad = (lat * Math.PI) / 180;
+  return ((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) * Math.pow(2, zoom);
+}
+
+function tileXToLon(x: number, zoom: number): number {
+  return (x / Math.pow(2, zoom)) * 360 - 180;
+}
+
+function tileYToLat(y: number, zoom: number): number {
+  const n = Math.PI - (2 * Math.PI * y) / Math.pow(2, zoom);
+  return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+}
+
+function getTileUrl(style: MapStyleType, z: number, x: number, y: number): string {
+  switch (style) {
+    case "satellite":
+      return `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
+    case "topographic":
+      return `https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/${z}/${y}/${x}`;
+    case "tactical":
+      return `https://basemaps.cartocdn.com/dark_all/${z}/${x}/${y}.png`;
+    case "osm":
+    default:
+      return `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
+  }
+}
+
+function stitchGeographicTilesAsync(
+  style: MapStyleType,
+  centerLat: number,
+  centerLon: number,
+  sizeMeters: number,
+  onSuccess: (texture: THREE.CanvasTexture) => void,
+  onFailure: (err: unknown) => void,
+) {
+  if (typeof window === "undefined" || typeof Image === "undefined") return;
+
+  const zoom = 13;
+  const maxTile = Math.pow(2, zoom) - 1;
+  const halfSizeM = sizeMeters / 2;
+  const metersPerDegLat = 111139;
+  const metersPerDegLon = 111319.49 * Math.max(0.1, Math.cos((centerLat * Math.PI) / 180));
+
+  const latMax = Math.min(85, centerLat + halfSizeM / metersPerDegLat);
+  const latMin = Math.max(-85, centerLat - halfSizeM / metersPerDegLat);
+  const lonMin = centerLon - halfSizeM / metersPerDegLon;
+  const lonMax = centerLon + halfSizeM / metersPerDegLon;
+
+  const minTx = Math.max(0, Math.floor(lonToTileX(lonMin, zoom)));
+  const maxTx = Math.min(maxTile, Math.floor(lonToTileX(lonMax, zoom)));
+  const minTy = Math.max(0, Math.floor(latToTileY(latMax, zoom)));
+  const maxTy = Math.min(maxTile, Math.floor(latToTileY(latMin, zoom)));
+
+  const tileTasks: Promise<{
+    img: HTMLImageElement;
+    tx: number;
+    ty: number;
+  } | null>[] = [];
+
+  for (let tx = minTx; tx <= maxTx; tx++) {
+    for (let ty = minTy; ty <= maxTy; ty++) {
+      const url = getTileUrl(style, zoom, tx, ty);
+      tileTasks.push(
+        new Promise((resolve) => {
+          const img = new Image();
+          img.crossOrigin = "anonymous";
+          const timeout = window.setTimeout(() => resolve(null), 7000);
+          img.onload = () => {
+            window.clearTimeout(timeout);
+            resolve({ img, tx, ty });
+          };
+          img.onerror = () => {
+            window.clearTimeout(timeout);
+            resolve(null);
+          };
+          img.src = url;
+        }),
+      );
+    }
+  }
+
+  Promise.all(tileTasks)
+    .then((results) => {
+      const validTiles = results.filter(
+        (r): r is { img: HTMLImageElement; tx: number; ty: number } => r !== null,
+      );
+      if (validTiles.length === 0) {
+        onFailure(new Error("No map tiles loaded (offline or blocked)"));
+        return;
+      }
+
+      const size = 2048;
+      const canvas = document.createElement("canvas");
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext("2d", { alpha: false })!;
+
+      ctx.fillStyle = style === "osm" ? "#e2e8f0" : "#0b111a";
+      ctx.fillRect(0, 0, size, size);
+
+      const toPx = (mX: number) => ((mX + halfSizeM) / sizeMeters) * size;
+      const toPy = (mZ: number) => ((mZ + halfSizeM) / sizeMeters) * size;
+
+      for (const { img, tx, ty } of validTiles) {
+        const tileLonW = tileXToLon(tx, zoom);
+        const tileLonE = tileXToLon(tx + 1, zoom);
+        const tileLatN = tileYToLat(ty, zoom);
+        const tileLatS = tileYToLat(ty + 1, zoom);
+
+        const mXW = (tileLonW - centerLon) * metersPerDegLon;
+        const mXE = (tileLonE - centerLon) * metersPerDegLon;
+        const mZN = -(tileLatN - centerLat) * metersPerDegLat;
+        const mZS = -(tileLatS - centerLat) * metersPerDegLat;
+
+        const px = toPx(mXW);
+        const py = toPy(mZN);
+        const pw = toPx(mXE) - px;
+        const ph = toPy(mZS) - py;
+
+        ctx.drawImage(img, px - 0.5, py - 0.5, pw + 1, ph + 1);
+      }
+
+      // Contrast tint for clear 3D plume & isoline readability over satellite/topo tiles
+      if (style === "satellite") {
+        ctx.fillStyle = "rgba(8, 12, 18, 0.24)";
+        ctx.fillRect(0, 0, size, size);
+      } else if (style === "topographic" || style === "osm") {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.14)";
+        ctx.fillRect(0, 0, size, size);
+      }
+
+      // Site epicenter perimeter marker
+      const metersPerPx = sizeMeters / size;
+      const siteHalfM = 280;
+      const siteL = toPx(-siteHalfM);
+      const siteT = toPy(-siteHalfM);
+      const siteW = (siteHalfM * 2) / metersPerPx;
+      ctx.strokeStyle = "rgba(239, 68, 68, 0.85)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(siteL, siteT, siteW, siteW);
+
+      renderCartographicGrid(ctx, size, centerLat, centerLon, sizeMeters, toPx, toPy);
+
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.wrapS = THREE.ClampToEdgeWrapping;
+      texture.wrapT = THREE.ClampToEdgeWrapping;
+      texture.generateMipmaps = true;
+      texture.minFilter = THREE.LinearMipmapLinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      texture.needsUpdate = true;
+
+      onSuccess(texture);
+    })
+    .catch(onFailure);
+}
+
 /**
- * Robust asynchronous texture loader with TextureLoader, CORS support,
- * error handling and guaranteed procedural fallback so a black ground is NEVER displayed.
+ * Robust asynchronous texture loader:
+ * immediately returns a calibrated procedural map texture (zero black frames),
+ * then asynchronously stitches real Web Mercator map tiles centered on (centerLat, centerLon).
  */
 export function loadMapTextureAsync(
   style: MapStyleType,
-  centerLat: number = 40.212,
-  centerLon: number = 68.865,
+  centerLat: number = JIZZAKH_NPP_LAT,
+  centerLon: number = JIZZAKH_NPP_LON,
   sizeMeters: number = 12000,
   customUrl?: string,
   onLoaded?: (texture: THREE.Texture) => void,
@@ -725,6 +886,18 @@ export function loadMapTextureAsync(
 
   if (!customUrl) {
     if (onLoaded) onLoaded(proceduralTexture);
+    stitchGeographicTilesAsync(
+      style,
+      centerLat,
+      centerLon,
+      sizeMeters,
+      (tileTexture) => {
+        if (onLoaded) onLoaded(tileTexture);
+      },
+      (err) => {
+        if (onError) onError(err);
+      },
+    );
     return proceduralTexture;
   }
 

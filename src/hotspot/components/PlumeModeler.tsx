@@ -1,14 +1,15 @@
-import { useState } from "react";
-import { formatArrivalTime } from "../lib/dispersion";
+import { useState, Fragment } from "react";
+import {
+  formatArrivalTime,
+  convertActivityToBq,
+  getNormalizedSourceMix,
+  getTotalMixActivityBq,
+} from "../lib/dispersion";
 import {
   Wind,
-  Thermometer,
-  Cloud,
   Mountain,
-  Building2,
   Activity,
   Play,
-  Download,
   ChevronDown,
   ChevronRight,
   AlertTriangle,
@@ -16,11 +17,30 @@ import {
   Shield,
   Zap,
   Boxes,
+  Plus,
+  Trash2,
+  Layers,
+  RefreshCw,
+  Compass,
 } from "lucide-react";
-import type { DispersionInput, DispersionResult, StabilityClass, ReleaseType } from "../lib/types";
+import type {
+  ActivityUnit,
+  DispersionInput,
+  DispersionResult,
+  StabilityClass,
+  ReleaseType,
+  SourceMixItem,
+} from "../lib/types";
 import { STABILITY_CLASS_DATA, ISOTOPE_LIBRARY } from "../lib/isotopes";
 import { formatDose, formatActivity, formatDistance } from "../lib/dispersion";
+import {
+  fetchCurrentMeteo,
+  calculateTransportVector,
+  estimatePasquillStability,
+} from "../lib/meteoService";
 import { PlumeVisualization } from "./PlumeVisualization";
+import { DoseChartView } from "./DoseChartView";
+import { WindRoseView } from "./WindRoseView";
 import { Plume3DView } from "../../renderer/simulation/plume3d";
 
 interface PlumeModelerProps {
@@ -30,9 +50,17 @@ interface PlumeModelerProps {
   onRunCalculation: () => void;
 }
 
+const ACTIVITY_UNIT_LABELS: Record<ActivityUnit, string> = {
+  TBq: "ТБк",
+  Bq: "Бк",
+  Ci: "Ки",
+};
+
 export function PlumeModeler({ input, setInput, result, onRunCalculation }: PlumeModelerProps) {
   const [activeSection, setActiveSection] = useState<string>("source");
   const [showResults, setShowResults] = useState(true);
+  const [meteoSyncing, setMeteoSyncing] = useState(false);
+  const [meteoSyncNote, setMeteoSyncNote] = useState<string | null>(null);
 
   const update = (section: keyof DispersionInput, field: string, value: unknown) => {
     setInput({
@@ -42,6 +70,109 @@ export function PlumeModeler({ input, setInput, result, onRunCalculation }: Plum
         [field]: value,
       },
     });
+  };
+
+  const activeMix: SourceMixItem[] =
+    input.sourceTerm.sourceMix && input.sourceTerm.sourceMix.length > 0
+      ? input.sourceTerm.sourceMix
+      : [
+          {
+            id: "mix-primary",
+            isotope: input.sourceTerm.isotope,
+            activity: input.sourceTerm.activity,
+            unit: "Bq",
+          },
+        ];
+
+  const syncSourceMix = (nextMix: SourceMixItem[]) => {
+    const normalized = nextMix.map((item) => ({
+      ...item,
+      activityBq: convertActivityToBq(item.activity, item.unit),
+    }));
+    const totalBq = normalized.reduce((sum, item) => sum + item.activityBq, 0);
+    const dominant = normalized.reduce(
+      (best, cur) => (cur.activityBq > best.activityBq ? cur : best),
+      normalized[0],
+    );
+
+    setInput({
+      ...input,
+      sourceTerm: {
+        ...input.sourceTerm,
+        sourceMix: nextMix,
+        isotope: dominant?.isotope ?? input.sourceTerm.isotope,
+        activity: totalBq,
+      },
+    });
+  };
+
+  const handleAddNuclide = () => {
+    const usedSymbols = new Set(activeMix.map((item) => item.isotope));
+    const nextIsotope =
+      ISOTOPE_LIBRARY.find((iso) => !usedSymbols.has(iso.symbol))?.symbol ??
+      ISOTOPE_LIBRARY[0].symbol;
+    const newItem: SourceMixItem = {
+      id: `mix-${crypto.randomUUID()}`,
+      isotope: nextIsotope,
+      activity: 10,
+      unit: "TBq",
+    };
+    syncSourceMix([...activeMix, newItem]);
+  };
+
+  const handleUpdateMixItem = (id: string, patch: Partial<SourceMixItem>) => {
+    const nextMix = activeMix.map((item) => (item.id === id ? { ...item, ...patch } : item));
+    syncSourceMix(nextMix);
+  };
+
+  const handleRemoveMixItem = (id: string) => {
+    if (activeMix.length <= 1) return;
+    syncSourceMix(activeMix.filter((item) => item.id !== id));
+  };
+
+  const totalMixBq = getTotalMixActivityBq({
+    ...input.sourceTerm,
+    sourceMix: activeMix,
+  });
+
+  const modelVector = calculateTransportVector(
+    input.meteorology.windSpeed,
+    input.meteorology.windDirection,
+    "to",
+  );
+
+  const handleSyncLiveMeteo = async () => {
+    setMeteoSyncing(true);
+    setMeteoSyncNote(null);
+    try {
+      const obs = await fetchCurrentMeteo(
+        input.sourceTerm.latitude,
+        input.sourceTerm.longitude,
+        true,
+      );
+      const vec = calculateTransportVector(obs.windSpeedMs, obs.windDirectionDeg, "from");
+      const stability = estimatePasquillStability(obs.windSpeedMs);
+      setInput({
+        ...input,
+        meteorology: {
+          ...input.meteorology,
+          windSpeed: Number(obs.windSpeedMs.toFixed(1)),
+          windDirection: Math.round(vec.transportAzimuthDeg),
+          airTemperature: Number(obs.temperatureC.toFixed(1)),
+          precipitationRate: Number(obs.precipitationMmh.toFixed(1)),
+          stabilityClass: stability,
+        },
+      });
+      setMeteoSyncNote(
+        `${obs.stationName}: ${obs.windSpeedMs.toFixed(1)} м/с, перенос ${Math.round(vec.transportAzimuthDeg)}°`,
+      );
+    } catch (err) {
+      setMeteoSyncNote(
+        err instanceof Error ? `Ошибка: ${err.message}` : "Не удалось загрузить метеоданные",
+      );
+    } finally {
+      setMeteoSyncing(false);
+    }
   };
 
   const toggleSection = (section: string) => {
@@ -62,41 +193,145 @@ export function PlumeModeler({ input, setInput, result, onRunCalculation }: Plum
             Plume Modeler
           </h1>
           <p className="text-xs mt-0.5" style={{ color: "var(--text-tertiary)" }}>
-            Gaussian dispersion · dose assessment
+            Gaussian dispersion · multi-nuclide dose assessment
           </p>
         </div>
 
         <div className="p-4 space-y-3">
           <Section
             id="source"
-            label="Source Term"
+            label="Source Term (Inventory Mix)"
             icon={Activity}
             isActive={activeSection === "source"}
             onToggle={() => toggleSection("source")}
           >
-            <Field label="Isotope">
-              <select
-                className="input-field"
-                value={input.sourceTerm.isotope}
-                onChange={(e) => update("sourceTerm", "isotope", e.target.value)}
+            <div
+              className="rounded-lg p-2.5 border space-y-2"
+              style={{
+                backgroundColor: "var(--bg-tertiary)",
+                borderColor: "var(--border-default)",
+              }}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <Layers className="w-3.5 h-3.5" style={{ color: "var(--accent)" }} />
+                  <span className="text-xs font-semibold" style={{ color: "var(--text-primary)" }}>
+                    Смесь радионуклидов ({activeMix.length})
+                  </span>
+                </div>
+                <span
+                  className="text-xs font-mono tabular-nums font-medium"
+                  style={{ color: "var(--accent)" }}
+                >
+                  Σ {formatActivity(totalMixBq)}
+                </span>
+              </div>
+
+              <div className="space-y-2">
+                {activeMix.map((item) => {
+                  const itemBq = convertActivityToBq(item.activity, item.unit);
+                  const sharePct = totalMixBq > 0 ? (itemBq / totalMixBq) * 100 : 0;
+
+                  return (
+                    <div
+                      key={item.id}
+                      className="rounded-md p-2 border space-y-1.5"
+                      style={{
+                        backgroundColor: "var(--bg-secondary)",
+                        borderColor: "var(--border-default)",
+                      }}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <select
+                          aria-label="Радионуклид"
+                          className="input-field flex-1 text-xs py-1.5"
+                          value={item.isotope}
+                          onChange={(e) =>
+                            handleUpdateMixItem(item.id, { isotope: e.target.value })
+                          }
+                        >
+                          {ISOTOPE_LIBRARY.map((iso) => (
+                            <option key={iso.symbol} value={iso.symbol}>
+                              {iso.symbol} — {iso.name}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveMixItem(item.id)}
+                          disabled={activeMix.length <= 1}
+                          title={
+                            activeMix.length <= 1
+                              ? "В смеси должен остаться минимум один нуклид"
+                              : "Удалить нуклид из смеси"
+                          }
+                          className="p-1.5 rounded border transition-colors disabled:opacity-35 disabled:cursor-not-allowed hover:border-red-500/50 hover:text-red-400"
+                          style={{
+                            borderColor: "var(--border-default)",
+                            color: "var(--text-tertiary)",
+                          }}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-5 gap-1.5">
+                        <input
+                          type="number"
+                          aria-label="Активность нуклида"
+                          className="input-field col-span-3 font-mono tabular-nums text-xs py-1.5"
+                          value={item.activity}
+                          min="0"
+                          step="any"
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            handleUpdateMixItem(item.id, {
+                              activity: Number.isFinite(val) && val >= 0 ? val : 0,
+                            });
+                          }}
+                        />
+                        <select
+                          aria-label="Единица активности"
+                          className="input-field col-span-2 text-xs py-1.5"
+                          value={item.unit}
+                          onChange={(e) =>
+                            handleUpdateMixItem(item.id, {
+                              unit: e.target.value as ActivityUnit,
+                            })
+                          }
+                        >
+                          {(Object.keys(ACTIVITY_UNIT_LABELS) as ActivityUnit[]).map((u) => (
+                            <option key={u} value={u}>
+                              {ACTIVITY_UNIT_LABELS[u]}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="flex items-center justify-between text-[11px] font-mono tabular-nums">
+                        <span style={{ color: "var(--text-tertiary)" }}>
+                          = {formatActivity(itemBq)}
+                        </span>
+                        <span style={{ color: "var(--accent)" }}>{sharePct.toFixed(1)}%</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <button
+                type="button"
+                onClick={handleAddNuclide}
+                className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md border text-xs font-medium transition-colors hover:bg-cyan-500/10"
+                style={{
+                  borderColor: "rgba(6, 182, 212, 0.35)",
+                  color: "var(--accent)",
+                  backgroundColor: "rgba(6, 182, 212, 0.05)",
+                }}
               >
-                {ISOTOPE_LIBRARY.map((iso) => (
-                  <option key={iso.symbol} value={iso.symbol}>
-                    {iso.name} ({iso.symbol})
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Activity (Bq)">
-              <input
-                type="number"
-                className="input-field"
-                value={input.sourceTerm.activity}
-                onChange={(e) => update("sourceTerm", "activity", parseFloat(e.target.value) || 0)}
-                step="1e12"
-              />
-              <UnitHint text={formatActivity(input.sourceTerm.activity)} />
-            </Field>
+                <Plus className="w-3.5 h-3.5" />+ Добавить нуклид
+              </button>
+            </div>
             <Field label="Release Duration (hours)">
               <input
                 type="number"
@@ -189,6 +424,34 @@ export function PlumeModeler({ input, setInput, result, onRunCalculation }: Plum
             isActive={activeSection === "met"}
             onToggle={() => toggleSection("met")}
           >
+            <div className="space-y-1.5">
+              <button
+                type="button"
+                onClick={handleSyncLiveMeteo}
+                disabled={meteoSyncing}
+                className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md border text-xs font-medium transition-colors hover:bg-cyan-500/10 disabled:opacity-50"
+                style={{
+                  borderColor: "rgba(6, 182, 212, 0.35)",
+                  color: "var(--accent)",
+                  backgroundColor: "rgba(6, 182, 212, 0.06)",
+                }}
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${meteoSyncing ? "animate-spin" : ""}`} />
+                {meteoSyncing ? "Загрузка погоды..." : "Синхр. погоду (Узгидромет / API)"}
+              </button>
+              {meteoSyncNote && (
+                <div
+                  className="text-[11px] font-mono px-2 py-1 rounded border"
+                  style={{
+                    backgroundColor: "var(--bg-tertiary)",
+                    borderColor: "var(--border-default)",
+                    color: "var(--text-secondary)",
+                  }}
+                >
+                  {meteoSyncNote}
+                </div>
+              )}
+            </div>
             <Field label="Wind Speed (m/s)">
               <input
                 type="number"
@@ -212,6 +475,25 @@ export function PlumeModeler({ input, setInput, result, onRunCalculation }: Plum
                 max="360"
               />
               <CompassRose direction={input.meteorology.windDirection} />
+              <div
+                className="grid grid-cols-2 gap-1.5 mt-1.5 px-2 py-1.5 rounded text-[11px] font-mono tabular-nums border"
+                style={{
+                  backgroundColor: "var(--bg-tertiary)",
+                  borderColor: "var(--border-default)",
+                  color: "var(--text-secondary)",
+                }}
+              >
+                <span>
+                  kₓ (E):{" "}
+                  <strong style={{ color: "var(--accent)" }}>{modelVector.kx.toFixed(3)}</strong>
+                </span>
+                <span>
+                  kᵧ (N):{" "}
+                  <strong style={{ color: "var(--accent)" }}>{modelVector.ky.toFixed(3)}</strong>
+                </span>
+                <span>uₓ: {modelVector.uxMs.toFixed(2)} м/с</span>
+                <span>uᵧ: {modelVector.uyMs.toFixed(2)} м/с</span>
+              </div>
             </Field>
             <Field label="Stability Class">
               <select
@@ -419,7 +701,7 @@ export function PlumeModeler({ input, setInput, result, onRunCalculation }: Plum
 
       <div className="flex-1 flex flex-col overflow-hidden">
         {result && showResults ? (
-          <ResultsPanel result={result} />
+          <ResultsPanel result={result} input={input} setInput={setInput} />
         ) : (
           <div
             className="flex-1 flex items-center justify-center"
@@ -530,13 +812,23 @@ function CompassRose({ direction }: { direction: number }) {
   );
 }
 
-function ResultsPanel({ result }: { result: DispersionResult }) {
-  const [activeTab, setActiveTab] = useState<"table" | "chart" | "map" | "3d" | "actions">("table");
+function ResultsPanel({
+  result,
+  input,
+  setInput,
+}: {
+  result: DispersionResult;
+  input: DispersionInput;
+  setInput: (input: DispersionInput) => void;
+}) {
+  const [activeTab, setActiveTab] = useState<
+    "table" | "chart" | "map" | "3d" | "windrose" | "actions"
+  >("table");
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       <div
-        className="flex items-center gap-1 px-4 py-2 border-b"
+        className="flex items-center gap-1 px-4 py-2 border-b overflow-x-auto"
         style={{ borderColor: "var(--border-default)" }}
       >
         {(
@@ -545,6 +837,7 @@ function ResultsPanel({ result }: { result: DispersionResult }) {
             { id: "chart", label: "Dose Chart", icon: Zap },
             { id: "map", label: "Plume Footprint", icon: MapPin },
             { id: "3d", label: "3D Plume (WebGL)", icon: Boxes },
+            { id: "windrose", label: "Wind Rose", icon: Compass },
             { id: "actions", label: "Protective Actions", icon: Shield },
           ] as const
         ).map((tab) => {
@@ -553,7 +846,7 @@ function ResultsPanel({ result }: { result: DispersionResult }) {
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors whitespace-nowrap"
               style={{
                 backgroundColor: activeTab === tab.id ? "rgba(6, 182, 212, 0.1)" : "transparent",
                 color: activeTab === tab.id ? "var(--accent)" : "var(--text-secondary)",
@@ -584,11 +877,16 @@ function ResultsPanel({ result }: { result: DispersionResult }) {
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto">
+      <div
+        className={activeTab === "3d" ? "flex-1 min-h-0 overflow-hidden" : "flex-1 overflow-y-auto"}
+      >
         {activeTab === "table" && <ResultsTable result={result} />}
         {activeTab === "chart" && <DoseChartView result={result} />}
         {activeTab === "map" && <PlumeVisualization result={result} />}
-        {activeTab === "3d" && <Plume3DView />}
+        {activeTab === "3d" && (
+          <Plume3DView syncedInput={input} onSyncedInputChange={setInput} embedded />
+        )}
+        {activeTab === "windrose" && <WindRoseView input={input} setInput={setInput} />}
         {activeTab === "actions" && <ProtectiveActionsView result={result} />}
       </div>
     </div>
@@ -596,8 +894,70 @@ function ResultsPanel({ result }: { result: DispersionResult }) {
 }
 
 function ResultsTable({ result }: { result: DispersionResult }) {
+  const [expandedDistances, setExpandedDistances] = useState<Record<number, boolean>>({});
+  const mix = getNormalizedSourceMix(result.input.sourceTerm);
+  const totalMixBq = getTotalMixActivityBq(result.input.sourceTerm);
+  const hasMultipleNuclides = mix.length > 1;
+  const allExpanded =
+    result.results.length > 0 &&
+    result.results.every((r) => Boolean(expandedDistances[r.distance]));
+
+  const toggleRow = (distance: number) => {
+    setExpandedDistances((prev) => ({ ...prev, [distance]: !prev[distance] }));
+  };
+
+  const toggleAllRows = () => {
+    if (allExpanded) {
+      setExpandedDistances({});
+    } else {
+      const next: Record<number, boolean> = {};
+      for (const r of result.results) next[r.distance] = true;
+      setExpandedDistances(next);
+    }
+  };
+
   return (
-    <div className="p-4">
+    <div className="p-4 space-y-3">
+      <div
+        className="panel px-4 py-2.5 flex flex-wrap items-center justify-between gap-2"
+        style={{ backgroundColor: "var(--bg-secondary)" }}
+      >
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
+            Активная смесь ({mix.length}):
+          </span>
+          {mix.map((m) => (
+            <span
+              key={m.id}
+              className="px-2 py-0.5 rounded font-mono tabular-nums"
+              style={{
+                backgroundColor: "var(--bg-tertiary)",
+                color: "var(--text-secondary)",
+                border: "1px solid var(--border-default)",
+              }}
+            >
+              {m.isotope}: {formatActivity(m.activityBq)}
+            </span>
+          ))}
+          <span className="font-mono tabular-nums font-semibold" style={{ color: "var(--accent)" }}>
+            Σ {formatActivity(totalMixBq)}
+          </span>
+        </div>
+
+        <button
+          type="button"
+          onClick={toggleAllRows}
+          className="text-xs px-2.5 py-1 rounded border transition-colors"
+          style={{
+            borderColor: "var(--border-default)",
+            color: allExpanded ? "var(--accent)" : "var(--text-secondary)",
+            backgroundColor: allExpanded ? "rgba(6, 182, 212, 0.08)" : "var(--bg-tertiary)",
+          }}
+        >
+          {allExpanded ? "Скрыть вклад нуклидов" : "Разбивка по нуклидам"}
+        </button>
+      </div>
+
       <div className="panel overflow-hidden">
         <table className="w-full text-sm">
           <thead>
@@ -624,202 +984,185 @@ function ResultsTable({ result }: { result: DispersionResult }) {
             </tr>
           </thead>
           <tbody>
-            {result.results.map((r, i) => (
-              <tr
-                key={i}
-                className="border-t transition-colors hover:bg-opacity-50"
-                style={{ borderColor: "var(--border-default)" }}
-              >
-                <td
-                  className="px-3 py-2 whitespace-nowrap font-medium"
-                  style={{ color: "var(--text-primary)" }}
-                >
-                  {formatDistance(r.distance)}
-                </td>
-                <td
-                  className="px-3 py-2 whitespace-nowrap font-mono text-xs"
-                  style={{ color: "var(--accent)" }}
-                >
-                  {r.centerlineConcentration > 0 ? r.centerlineConcentration.toExponential(2) : "—"}
-                </td>
-                <td
-                  className="px-3 py-2 whitespace-nowrap"
-                  style={{ color: "var(--text-secondary)" }}
-                >
-                  {r.crosswindSpread.toFixed(0)}
-                </td>
-                <td
-                  className="px-3 py-2 whitespace-nowrap"
-                  style={{ color: "var(--text-secondary)" }}
-                >
-                  {r.verticalSpread.toFixed(0)}
-                </td>
-                <td
-                  className="px-3 py-2 whitespace-nowrap"
-                  style={{ color: "var(--text-secondary)" }}
-                >
-                  {formatDose(r.cloudDose)}
-                </td>
-                <td
-                  className="px-3 py-2 whitespace-nowrap"
-                  style={{ color: "var(--text-secondary)" }}
-                >
-                  {formatDose(r.inhalationDose)}
-                </td>
-                <td
-                  className="px-3 py-2 whitespace-nowrap font-bold"
-                  style={{
-                    color:
-                      r.totalEffectiveDose >= 0.1
-                        ? "var(--danger)"
-                        : r.totalEffectiveDose >= 0.01
-                          ? "var(--warning)"
-                          : "var(--text-primary)",
-                  }}
-                >
-                  {formatDose(r.totalEffectiveDose)}
-                </td>
-                <td
-                  className="px-3 py-2 whitespace-nowrap"
-                  style={{ color: "var(--text-secondary)" }}
-                >
-                  {formatDose(r.thyroidDose)}
-                </td>
-                <td
-                  className="px-3 py-2 whitespace-nowrap text-xs"
-                  style={{ color: "var(--text-tertiary)" }}
-                >
-                  {r.arrivalTimeFormatted ?? formatArrivalTime(r.arrivalTime)}
-                </td>
-              </tr>
-            ))}
+            {result.results.map((r) => {
+              const breakdown = r.nuclideBreakdown ?? [];
+              const isExpanded = Boolean(expandedDistances[r.distance]);
+              const canExpand = breakdown.length > 0;
+
+              return (
+                <Fragment key={r.distance}>
+                  <tr
+                    onClick={() => canExpand && toggleRow(r.distance)}
+                    className={`border-t transition-colors ${canExpand ? "cursor-pointer hover:bg-white/[0.02]" : ""}`}
+                    style={{ borderColor: "var(--border-default)" }}
+                  >
+                    <td
+                      className="px-3 py-2 whitespace-nowrap font-medium font-mono tabular-nums"
+                      style={{ color: "var(--text-primary)" }}
+                    >
+                      <span className="inline-flex items-center gap-1.5">
+                        {canExpand &&
+                          (isExpanded ? (
+                            <ChevronDown
+                              className="w-3.5 h-3.5"
+                              style={{ color: "var(--accent)" }}
+                            />
+                          ) : (
+                            <ChevronRight
+                              className="w-3.5 h-3.5"
+                              style={{ color: "var(--text-tertiary)" }}
+                            />
+                          ))}
+                        {formatDistance(r.distance)}
+                      </span>
+                    </td>
+                    <td
+                      className="px-3 py-2 whitespace-nowrap font-mono tabular-nums text-xs"
+                      style={{ color: "var(--accent)" }}
+                    >
+                      {r.centerlineConcentration > 0
+                        ? r.centerlineConcentration.toExponential(2)
+                        : "—"}
+                    </td>
+                    <td
+                      className="px-3 py-2 whitespace-nowrap font-mono tabular-nums"
+                      style={{ color: "var(--text-secondary)" }}
+                    >
+                      {r.crosswindSpread.toFixed(0)}
+                    </td>
+                    <td
+                      className="px-3 py-2 whitespace-nowrap font-mono tabular-nums"
+                      style={{ color: "var(--text-secondary)" }}
+                    >
+                      {r.verticalSpread.toFixed(0)}
+                    </td>
+                    <td
+                      className="px-3 py-2 whitespace-nowrap font-mono tabular-nums"
+                      style={{ color: "var(--text-secondary)" }}
+                    >
+                      {formatDose(r.cloudDose)}
+                    </td>
+                    <td
+                      className="px-3 py-2 whitespace-nowrap font-mono tabular-nums"
+                      style={{ color: "var(--text-secondary)" }}
+                    >
+                      {formatDose(r.inhalationDose)}
+                    </td>
+                    <td
+                      className="px-3 py-2 whitespace-nowrap font-bold font-mono tabular-nums"
+                      style={{
+                        color:
+                          r.totalEffectiveDose >= 0.1
+                            ? "var(--danger)"
+                            : r.totalEffectiveDose >= 0.01
+                              ? "var(--warning)"
+                              : "var(--text-primary)",
+                      }}
+                    >
+                      {formatDose(r.totalEffectiveDose)}
+                    </td>
+                    <td
+                      className="px-3 py-2 whitespace-nowrap font-mono tabular-nums"
+                      style={{ color: "var(--text-secondary)" }}
+                    >
+                      {formatDose(r.thyroidDose)}
+                    </td>
+                    <td
+                      className="px-3 py-2 whitespace-nowrap text-xs font-mono tabular-nums"
+                      style={{ color: "var(--text-tertiary)" }}
+                    >
+                      {r.arrivalTimeFormatted ?? formatArrivalTime(r.arrivalTime)}
+                    </td>
+                  </tr>
+
+                  {isExpanded &&
+                    breakdown.map((b) => {
+                      const doseSharePct =
+                        r.totalEffectiveDose > 0
+                          ? (b.totalEffectiveDose / r.totalEffectiveDose) * 100
+                          : 0;
+                      return (
+                        <tr
+                          key={`${r.distance}-${b.id}`}
+                          className="border-t text-xs"
+                          style={{
+                            borderColor: "var(--border-default)",
+                            backgroundColor: "rgba(6, 182, 212, 0.03)",
+                          }}
+                        >
+                          <td
+                            className="pl-8 pr-3 py-1.5 whitespace-nowrap font-mono tabular-nums"
+                            style={{ color: "var(--text-secondary)" }}
+                          >
+                            <span className="font-semibold" style={{ color: "var(--accent)" }}>
+                              {b.isotope}
+                            </span>
+                            {hasMultipleNuclides && (
+                              <span
+                                className="ml-1.5 text-[11px]"
+                                style={{ color: "var(--text-tertiary)" }}
+                              >
+                                ({doseSharePct.toFixed(1)}%)
+                              </span>
+                            )}
+                          </td>
+                          <td
+                            className="px-3 py-1.5 whitespace-nowrap font-mono tabular-nums"
+                            style={{ color: "var(--text-tertiary)" }}
+                          >
+                            {b.concentration > 0 ? b.concentration.toExponential(2) : "—"}
+                          </td>
+                          <td
+                            className="px-3 py-1.5 whitespace-nowrap font-mono"
+                            style={{ color: "var(--text-tertiary)" }}
+                          >
+                            —
+                          </td>
+                          <td
+                            className="px-3 py-1.5 whitespace-nowrap font-mono"
+                            style={{ color: "var(--text-tertiary)" }}
+                          >
+                            —
+                          </td>
+                          <td
+                            className="px-3 py-1.5 whitespace-nowrap font-mono tabular-nums"
+                            style={{ color: "var(--text-tertiary)" }}
+                          >
+                            {formatDose(b.cloudDose)}
+                          </td>
+                          <td
+                            className="px-3 py-1.5 whitespace-nowrap font-mono tabular-nums"
+                            style={{ color: "var(--text-tertiary)" }}
+                          >
+                            {formatDose(b.inhalationDose)}
+                          </td>
+                          <td
+                            className="px-3 py-1.5 whitespace-nowrap font-mono tabular-nums font-semibold"
+                            style={{ color: "var(--text-secondary)" }}
+                          >
+                            {formatDose(b.totalEffectiveDose)}
+                          </td>
+                          <td
+                            className="px-3 py-1.5 whitespace-nowrap font-mono tabular-nums"
+                            style={{ color: "var(--text-tertiary)" }}
+                          >
+                            {formatDose(b.thyroidDose)}
+                          </td>
+                          <td
+                            className="px-3 py-1.5 whitespace-nowrap font-mono"
+                            style={{ color: "var(--text-tertiary)" }}
+                          >
+                            —
+                          </td>
+                        </tr>
+                      );
+                    })}
+                </Fragment>
+              );
+            })}
           </tbody>
         </table>
       </div>
-    </div>
-  );
-}
-
-function DoseChartView({ result }: { result: DispersionResult }) {
-  const w = 900;
-  const h = 400;
-  const pad = 60;
-  const maxDose = Math.max(...result.results.map((r) => r.totalEffectiveDose), 1e-10);
-  const maxDist = Math.max(...result.results.map((r) => r.distance));
-
-  const xScale = (d: number) => pad + (d / maxDist) * (w - pad * 2);
-  const yScale = (dose: number) => h - pad - (dose / maxDose) * (h - pad * 2);
-
-  const doseLine = result.results
-    .map((r) => `${xScale(r.distance)},${yScale(r.totalEffectiveDose)}`)
-    .join(" ");
-  const cloudLine = result.results
-    .map((r) => `${xScale(r.distance)},${yScale(r.cloudDose)}`)
-    .join(" ");
-  const inhaleLine = result.results
-    .map((r) => `${xScale(r.distance)},${yScale(r.inhalationDose)}`)
-    .join(" ");
-
-  const gridLines = [0, 0.25, 0.5, 0.75, 1];
-
-  return (
-    <div className="p-4">
-      <div className="panel p-4">
-        <div className="flex items-center gap-4 mb-3">
-          <LegendItem color="var(--danger)" label="Total Effective Dose" />
-          <LegendItem color="var(--accent)" label="Cloud Dose" />
-          <LegendItem color="var(--warning)" label="Inhalation Dose" />
-        </div>
-        <svg viewBox={`0 0 ${w} ${h}`} className="w-full">
-          {gridLines.map((g) => (
-            <line
-              key={g}
-              x1={pad}
-              y1={pad + g * (h - pad * 2)}
-              x2={w - pad}
-              y2={pad + g * (h - pad * 2)}
-              stroke="var(--border-default)"
-              strokeWidth="0.5"
-              strokeDasharray="4 4"
-            />
-          ))}
-          <line
-            x1={pad}
-            y1={h - pad}
-            x2={w - pad}
-            y2={h - pad}
-            stroke="var(--border-light)"
-            strokeWidth="1"
-          />
-          <line
-            x1={pad}
-            y1={pad}
-            x2={pad}
-            y2={h - pad}
-            stroke="var(--border-light)"
-            strokeWidth="1"
-          />
-
-          <polyline points={doseLine} fill="none" stroke="var(--danger)" strokeWidth="2.5" />
-          <polyline points={cloudLine} fill="none" stroke="var(--accent)" strokeWidth="2" />
-          <polyline points={inhaleLine} fill="none" stroke="var(--warning)" strokeWidth="2" />
-
-          {result.results.map((r, i) => (
-            <g key={i}>
-              <circle
-                cx={xScale(r.distance)}
-                cy={yScale(r.totalEffectiveDose)}
-                r="3"
-                fill="var(--danger)"
-              />
-            </g>
-          ))}
-
-          {[0, 0.25, 0.5, 0.75, 1].map((g) => (
-            <text
-              key={g}
-              x={pad - 8}
-              y={pad + g * (h - pad * 2) + 4}
-              fill="var(--text-tertiary)"
-              fontSize="10"
-              textAnchor="end"
-            >
-              {formatDose(maxDose * (1 - g))}
-            </text>
-          ))}
-
-          <text
-            x={w / 2}
-            y={h - pad + 30}
-            fill="var(--text-tertiary)"
-            fontSize="11"
-            textAnchor="middle"
-          >
-            Downwind Distance (m)
-          </text>
-          <text
-            x={20}
-            y={h / 2}
-            fill="var(--text-tertiary)"
-            fontSize="11"
-            textAnchor="middle"
-            transform={`rotate(-90 20 ${h / 2})`}
-          >
-            Dose (Sv)
-          </text>
-        </svg>
-      </div>
-    </div>
-  );
-}
-
-function LegendItem({ color, label }: { color: string; label: string }) {
-  return (
-    <div className="flex items-center gap-2">
-      <div className="w-3 h-3 rounded-full" style={{ backgroundColor: color }} />
-      <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
-        {label}
-      </span>
     </div>
   );
 }
