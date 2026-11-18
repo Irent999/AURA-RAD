@@ -49,7 +49,7 @@ function App() {
       buildingWake: false,
       complexTerrain: false,
     },
-    distances: [100, 250, 500, 1000, 2000, 5000, 10000, 20000, 50000],
+    distances: [30, 50, 100, 150, 200, 300, 500, 750, 1000, 1500],
     receptorHeight: 1.5,
     calculationType: "plume",
     averagingTime: 3600,

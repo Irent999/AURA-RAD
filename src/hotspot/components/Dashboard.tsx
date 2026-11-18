@@ -178,10 +178,10 @@ export function Dashboard({
                 </div>
                 <div>
                   <div className="text-xs" style={{ color: "var(--text-tertiary)" }}>
-                    Peak Concentration
+                    Peak Integrated Conc. (Ψ)
                   </div>
                   <div className="text-lg font-bold" style={{ color: "var(--accent)" }}>
-                    {result.maxConcentration.value.toExponential(2)} Bq/m³
+                    {result.maxConcentration.value.toExponential(2)} Бк·с/м³
                   </div>
                 </div>
                 <div>
@@ -367,12 +367,13 @@ function InfoCell({ label, value }: { label: string; value: string }) {
 
 function DoseChart({ results }: { results: { distance: number; totalEffectiveDose: number }[] }) {
   if (results.length === 0) return null;
-  const maxDose = Math.max(...results.map((r) => r.totalEffectiveDose), 1e-10);
-  const maxDist = Math.max(...results.map((r) => r.distance));
+  const sorted = [...results].sort((a, b) => a.distance - b.distance);
+  const maxDose = Math.max(...sorted.map((r) => r.totalEffectiveDose), 1e-10);
+  const maxDist = Math.max(...sorted.map((r) => r.distance));
   const w = 480;
   const h = 200;
   const pad = 40;
-  const points = results.map((r) => {
+  const points = sorted.map((r) => {
     const x = pad + (r.distance / maxDist) * (w - pad * 2);
     const y = h - pad - (r.totalEffectiveDose / maxDose) * (h - pad * 2);
     return `${x},${y}`;
@@ -396,7 +397,7 @@ function DoseChart({ results }: { results: { distance: number; totalEffectiveDos
         strokeWidth="2"
         strokeLinejoin="round"
       />
-      {results.map((r, i) => {
+      {sorted.map((r, i) => {
         const x = pad + (r.distance / maxDist) * (w - pad * 2);
         const y = h - pad - (r.totalEffectiveDose / maxDose) * (h - pad * 2);
         return <circle key={i} cx={x} cy={y} r="3" fill="var(--accent)" />;

@@ -1,7 +1,8 @@
-import { useState, Fragment } from "react";
+import { useState, useEffect, useRef, Fragment } from "react";
 import {
   formatArrivalTime,
   convertActivityToBq,
+  computeDepositionVelocity,
   getNormalizedSourceMix,
   getTotalMixActivityBq,
 } from "../lib/dispersion";
@@ -22,6 +23,7 @@ import {
   Layers,
   RefreshCw,
   Compass,
+  Download,
 } from "lucide-react";
 import type {
   ActivityUnit,
@@ -56,11 +58,67 @@ const ACTIVITY_UNIT_LABELS: Record<ActivityUnit, string> = {
   Ci: "Ки",
 };
 
+const MAX_RECEPTOR_DISTANCES = 10;
+
+function parseDistancesInput(raw: string): {
+  allValid: number[];
+  clamped: number[];
+  isOverLimit: boolean;
+} {
+  const allValid = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map(Number)
+    .filter((n) => !Number.isNaN(n) && Number.isFinite(n) && n > 0);
+  return {
+    allValid,
+    clamped: allValid.slice(0, MAX_RECEPTOR_DISTANCES),
+    isOverLimit: allValid.length > MAX_RECEPTOR_DISTANCES,
+  };
+}
+
+function areNumberArraysEqual(a: number[], b: number[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
 export function PlumeModeler({ input, setInput, result, onRunCalculation }: PlumeModelerProps) {
   const [activeSection, setActiveSection] = useState<string>("source");
   const [showResults, setShowResults] = useState(true);
   const [meteoSyncing, setMeteoSyncing] = useState(false);
   const [meteoSyncNote, setMeteoSyncNote] = useState<string | null>(null);
+  const [rawDistancesInput, setRawDistancesInput] = useState<string>(() =>
+    input.distances.slice(0, MAX_RECEPTOR_DISTANCES).join(", "),
+  );
+  const lastCommittedDistancesRef = useRef<number[]>(input.distances);
+
+  useEffect(() => {
+    if (!areNumberArraysEqual(input.distances, lastCommittedDistancesRef.current)) {
+      lastCommittedDistancesRef.current = input.distances;
+      setRawDistancesInput(input.distances.slice(0, MAX_RECEPTOR_DISTANCES).join(", "));
+    }
+  }, [input.distances]);
+
+  const parsedDistances = parseDistancesInput(rawDistancesInput);
+
+  const commitDistances = (normalizeRaw: boolean) => {
+    const { clamped } = parseDistancesInput(rawDistancesInput);
+    if (clamped.length > 0) {
+      if (!areNumberArraysEqual(clamped, input.distances)) {
+        lastCommittedDistancesRef.current = clamped;
+        setInput({ ...input, distances: clamped });
+      }
+      if (normalizeRaw) {
+        setRawDistancesInput(clamped.join(", "));
+      }
+    } else if (normalizeRaw) {
+      setRawDistancesInput(input.distances.slice(0, MAX_RECEPTOR_DISTANCES).join(", "));
+    }
+  };
 
   const update = (section: keyof DispersionInput, field: string, value: unknown) => {
     setInput({
@@ -385,7 +443,25 @@ export function PlumeModeler({ input, setInput, result, onRunCalculation }: Plum
                   update("sourceTerm", "particleSize", parseFloat(e.target.value) || 0)
                 }
                 step="0.1"
+                disabled={input.sourceTerm.physicalForm === "gas"}
               />
+              {(() => {
+                const sampleVd = computeDepositionVelocity(
+                  input.sourceTerm.isotope,
+                  input.sourceTerm.physicalForm,
+                  input.sourceTerm.particleSize,
+                );
+                return (
+                  <div
+                    className="text-[11px] font-mono tabular-nums mt-1"
+                    style={{ color: sampleVd === 0 ? "var(--text-tertiary)" : "var(--accent)" }}
+                  >
+                    {sampleVd === 0
+                      ? "v_d = 0 м/с (без осаждения, истощение шлейфа отключено)"
+                      : `v_d = ${sampleVd.toFixed(3)} м/с (сухое осаждение и истощение шлейфа)`}
+                  </div>
+                );
+              })()}
             </Field>
             <div className="grid grid-cols-2 gap-2">
               <Field label="Latitude (°)">
@@ -664,18 +740,44 @@ export function PlumeModeler({ input, setInput, result, onRunCalculation }: Plum
             <Field label="Distances (m, comma-separated)">
               <input
                 type="text"
+                inputMode="decimal"
                 className="input-field font-mono text-xs"
-                value={input.distances.join(", ")}
-                onChange={(e) =>
-                  setInput({
-                    ...input,
-                    distances: e.target.value
-                      .split(",")
-                      .map((d) => parseFloat(d.trim()))
-                      .filter((d) => !isNaN(d) && d > 0),
-                  })
-                }
+                placeholder="30, 50, 100, 150, 200, 300, 500, 750, 1000, 1500"
+                value={rawDistancesInput}
+                onChange={(e) => {
+                  const nextRaw = e.target.value;
+                  setRawDistancesInput(nextRaw);
+                  const { clamped } = parseDistancesInput(nextRaw);
+                  if (clamped.length > 0 && !areNumberArraysEqual(clamped, input.distances)) {
+                    lastCommittedDistancesRef.current = clamped;
+                    setInput({ ...input, distances: clamped });
+                  }
+                }}
+                onBlur={() => commitDistances(true)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    commitDistances(true);
+                  }
+                }}
               />
+              <div className="flex items-center justify-between gap-2 mt-1.5 text-[11px] font-mono tabular-nums">
+                <span
+                  style={{
+                    color:
+                      parsedDistances.clamped.length === 0
+                        ? "var(--danger)"
+                        : parsedDistances.isOverLimit
+                          ? "var(--warning)"
+                          : "var(--text-tertiary)",
+                  }}
+                >
+                  Точек измерения: {parsedDistances.clamped.length} / {MAX_RECEPTOR_DISTANCES}
+                </span>
+                {parsedDistances.isOverLimit && (
+                  <span style={{ color: "var(--warning)" }}>Лимит 10 точек (лишние обрезаны)</span>
+                )}
+              </div>
             </Field>
           </Section>
 
@@ -812,6 +914,111 @@ function CompassRose({ direction }: { direction: number }) {
   );
 }
 
+function generateCsvSummary(result: DispersionResult): string {
+  const { input, results } = result;
+  const mix = getNormalizedSourceMix(input.sourceTerm);
+  const escapeCsv = (value: string | number): string => {
+    const str = String(value);
+    return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+  };
+
+  const lines: string[] = [
+    "AURA-RAD Plume Dispersion Summary Report",
+    `Source Mix,${escapeCsv(mix.map((m) => `${m.isotope} (${m.activity} ${m.unit})`).join("; "))}`,
+    `Physical Form,${escapeCsv(input.sourceTerm.physicalForm)}`,
+    `Particle Size (um),${input.sourceTerm.particleSize}`,
+    `Release Height (m),${input.sourceTerm.releaseHeight}`,
+    `Wind Speed (m/s),${input.meteorology.windSpeed}`,
+    `Stability Class,${input.meteorology.stabilityClass}`,
+    `Terrain Type,${input.terrain.terrainType}`,
+    `Receptor Height (m),${input.receptorHeight}`,
+    "",
+    [
+      "Distance (m)",
+      "Integrated Concentration Psi (Bq*s/m^3)",
+      "Sigma_y (m)",
+      "Sigma_z (m)",
+      "Plume Width (m)",
+      "Cloud Dose (Sv)",
+      "Cloud Dose (mSv)",
+      "Inhalation Dose (Sv)",
+      "Inhalation Dose (mSv)",
+      "Ground Dose (Sv)",
+      "Ground Dose (mSv)",
+      "Total Effective Dose / TEDE (Sv)",
+      "Total Effective Dose / TEDE (mSv)",
+      "Thyroid Dose (Sv)",
+      "Thyroid Dose (mSv)",
+      "Surface Deposition (Bq/m^2)",
+      "Arrival Time (s)",
+    ].join(","),
+  ];
+
+  for (const r of results) {
+    lines.push(
+      [
+        r.distance,
+        r.centerlineConcentration.toExponential(4),
+        r.crosswindSpread.toFixed(2),
+        r.verticalSpread.toFixed(2),
+        r.plumeWidth.toFixed(2),
+        r.cloudDose.toExponential(4),
+        (r.cloudDose * 1000).toFixed(4),
+        r.inhalationDose.toExponential(4),
+        (r.inhalationDose * 1000).toFixed(4),
+        r.groundDose.toExponential(4),
+        (r.groundDose * 1000).toFixed(4),
+        r.totalEffectiveDose.toExponential(4),
+        (r.totalEffectiveDose * 1000).toFixed(4),
+        r.thyroidDose.toExponential(4),
+        (r.thyroidDose * 1000).toFixed(4),
+        r.plumeDeposition.toExponential(4),
+        r.arrivalTime.toFixed(1),
+      ].join(","),
+    );
+  }
+
+  const hasBreakdowns = results.some((r) => (r.nuclideBreakdown?.length ?? 0) > 0);
+  if (hasBreakdowns) {
+    lines.push("");
+    lines.push("Per-Nuclide Breakdown by Distance");
+    lines.push(
+      [
+        "Distance (m)",
+        "Isotope",
+        "Activity (Bq)",
+        "Psi (Bq*s/m^3)",
+        "Cloud Dose (mSv)",
+        "Inhalation Dose (mSv)",
+        "Ground Dose (mSv)",
+        "TEDE (mSv)",
+        "Thyroid Dose (mSv)",
+        "Surface Deposition (Bq/m^2)",
+      ].join(","),
+    );
+    for (const r of results) {
+      for (const b of r.nuclideBreakdown ?? []) {
+        lines.push(
+          [
+            r.distance,
+            escapeCsv(b.isotope),
+            b.activityBq.toExponential(4),
+            b.concentration.toExponential(4),
+            (b.cloudDose * 1000).toFixed(4),
+            (b.inhalationDose * 1000).toFixed(4),
+            (b.groundDose * 1000).toFixed(4),
+            (b.totalEffectiveDose * 1000).toFixed(4),
+            (b.thyroidDose * 1000).toFixed(4),
+            b.plumeDeposition.toExponential(4),
+          ].join(","),
+        );
+      }
+    }
+  }
+
+  return `\uFEFF${lines.join("\n")}`;
+}
+
 function ResultsPanel({
   result,
   input,
@@ -825,38 +1032,68 @@ function ResultsPanel({
     "table" | "chart" | "map" | "3d" | "windrose" | "actions"
   >("table");
 
+  const handleDownloadReport = () => {
+    const csv = generateCsvSummary(result);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const stamp = new Date().toISOString().slice(0, 10);
+    a.download = `aura-rad-plume-report-${stamp}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       <div
-        className="flex items-center gap-1 px-4 py-2 border-b overflow-x-auto"
+        className="flex items-center justify-between gap-2 px-4 py-2 border-b overflow-x-auto"
         style={{ borderColor: "var(--border-default)" }}
       >
-        {(
-          [
-            { id: "table", label: "Results Table", icon: Activity },
-            { id: "chart", label: "Dose Chart", icon: Zap },
-            { id: "map", label: "Plume Footprint", icon: MapPin },
-            { id: "3d", label: "3D Plume (WebGL)", icon: Boxes },
-            { id: "windrose", label: "Wind Rose", icon: Compass },
-            { id: "actions", label: "Protective Actions", icon: Shield },
-          ] as const
-        ).map((tab) => {
-          const Icon = tab.icon;
-          return (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors whitespace-nowrap"
-              style={{
-                backgroundColor: activeTab === tab.id ? "rgba(6, 182, 212, 0.1)" : "transparent",
-                color: activeTab === tab.id ? "var(--accent)" : "var(--text-secondary)",
-              }}
-            >
-              <Icon className="w-3.5 h-3.5" />
-              {tab.label}
-            </button>
-          );
-        })}
+        <div className="flex items-center gap-1">
+          {(
+            [
+              { id: "table", label: "Results Table", icon: Activity },
+              { id: "chart", label: "Dose Chart", icon: Zap },
+              { id: "map", label: "Plume Footprint", icon: MapPin },
+              { id: "3d", label: "3D Plume (WebGL)", icon: Boxes },
+              { id: "windrose", label: "Wind Rose", icon: Compass },
+              { id: "actions", label: "Protective Actions", icon: Shield },
+            ] as const
+          ).map((tab) => {
+            const Icon = tab.icon;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors whitespace-nowrap"
+                style={{
+                  backgroundColor: activeTab === tab.id ? "rgba(6, 182, 212, 0.1)" : "transparent",
+                  color: activeTab === tab.id ? "var(--accent)" : "var(--text-secondary)",
+                }}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <button
+          type="button"
+          onClick={handleDownloadReport}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border transition-colors hover:bg-cyan-500/10 whitespace-nowrap flex-shrink-0"
+          style={{
+            borderColor: "rgba(6, 182, 212, 0.35)",
+            color: "var(--accent)",
+            backgroundColor: "rgba(6, 182, 212, 0.06)",
+          }}
+        >
+          <Download className="w-3.5 h-3.5" />
+          Download Report
+        </button>
       </div>
 
       {result.warnings.length > 0 && (
@@ -964,7 +1201,7 @@ function ResultsTable({ result }: { result: DispersionResult }) {
             <tr style={{ backgroundColor: "var(--bg-tertiary)" }}>
               {[
                 "Distance",
-                "Concentration",
+                "Ψ (Бк·с/м³)",
                 "σy",
                 "σz",
                 "Cloud Dose",
@@ -984,13 +1221,13 @@ function ResultsTable({ result }: { result: DispersionResult }) {
             </tr>
           </thead>
           <tbody>
-            {result.results.map((r) => {
+            {result.results.map((r, idx) => {
               const breakdown = r.nuclideBreakdown ?? [];
               const isExpanded = Boolean(expandedDistances[r.distance]);
               const canExpand = breakdown.length > 0;
 
               return (
-                <Fragment key={r.distance}>
+                <Fragment key={`${r.distance}-${idx}`}>
                   <tr
                     onClick={() => canExpand && toggleRow(r.distance)}
                     className={`border-t transition-colors ${canExpand ? "cursor-pointer hover:bg-white/[0.02]" : ""}`}
