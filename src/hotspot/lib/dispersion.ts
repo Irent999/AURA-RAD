@@ -15,15 +15,15 @@ import { solveDecayChain, type DecayChainResult } from "./rk45";
 
 /*
  * All physics uses strict SI base units:
- *   Q       [Bq/s]      source release rate
+ *   Q       [Bq]        total released activity
  *   u       [m/s]       wind speed
  *   x       [m]         downwind distance
- *   sy, sz  [m]         Pasquill-Gifford dispersion coefficients
- *   C       [Bq/m^3]    air concentration
+ *   sy, sz  [m]         Briggs Pasquill-Gifford dispersion coefficients
+ *   Psi     [Bq*s/m^3]  time-integrated air concentration
  *   dose    [Sv]        all dose quantities
  */
 
-const BREATHING_RATE = 3.3e-4; // m^3/s (ICRP adult, light activity)
+const BREATHING_RATE = 3.33e-4; // m^3/s (1.2 m^3/h, ICRP 60 / 119 adult light activity)
 const EARTH_RADIUS_M = 6371000;
 
 export function convertActivityToBq(activity: number, unit: ActivityUnit): number {
@@ -67,71 +67,70 @@ export function formatMixSummary(sourceTerm: SourceTerm): string {
   return `${mix[0].isotope} + ${mix.length - 1} more`;
 }
 
-// Martin (1976) Pasquill-Gifford power-law fits
-type PGCoefficients = {
-  c: number;
-  d: number;
-  f: number;
-};
+// Calibrated Briggs / Pasquill-Gifford dispersion coefficients for Open Country (rural)
+function sigmaRural(stability: StabilityClass, distance: number): { sy: number; sz: number } {
+  const x = Math.max(distance, 1);
+  let sy = 0;
+  let sz = 0;
 
-const SIGMA_Y_A: Record<StabilityClass, number> = {
-  A: 213,
-  B: 156,
-  C: 104,
-  D: 68,
-  E: 50.5,
-  F: 34,
-};
+  switch (stability) {
+    case "A":
+      sy = 0.22 * x * Math.pow(1 + 0.0001 * x, -0.5);
+      sz = 0.2 * x * Math.sqrt(1 + 0.0003 * x);
+      break;
+    case "B":
+      sy = 0.16 * x * Math.pow(1 + 0.0001 * x, -0.5);
+      sz = 0.12 * x * Math.sqrt(1 + 0.0001 * x);
+      break;
+    case "C":
+      sy = 0.11 * x * Math.pow(1 + 0.0001 * x, -0.5);
+      sz = 0.08 * x * Math.pow(1 + 0.0002 * x, -0.5);
+      break;
+    case "D":
+      sy = 0.08 * x * Math.pow(1 + 0.0001 * x, -0.5);
+      sz = 0.06 * x * Math.pow(1 + 0.001 * x, -0.5);
+      break;
+    case "E":
+      sy = 0.06 * x * Math.pow(1 + 0.0001 * x, -0.5);
+      sz = 0.03 * x * Math.pow(1 + 0.0003 * x, -0.5);
+      break;
+    case "F":
+    default:
+      sy = 0.04 * x * Math.pow(1 + 0.0001 * x, -0.5);
+      sz = 0.02 * x * Math.pow(1 + 0.0003 * x, -0.5);
+      break;
+  }
 
-const SIGMA_Z_NEAR: Record<StabilityClass, PGCoefficients> = {
-  A: { c: 440.8, d: 1.941, f: 9.27 },
-  B: { c: 106.6, d: 1.149, f: 3.3 },
-  C: { c: 61.0, d: 0.911, f: 0 },
-  D: { c: 33.2, d: 0.725, f: -1.7 },
-  E: { c: 22.8, d: 0.678, f: -1.3 },
-  F: { c: 14.35, d: 0.74, f: -0.35 },
-};
-
-const SIGMA_Z_FAR: Record<StabilityClass, PGCoefficients> = {
-  A: { c: 459.7, d: 2.094, f: -9.6 },
-  B: { c: 108.2, d: 1.098, f: 2.0 },
-  C: { c: 61.0, d: 0.911, f: 0 },
-  D: { c: 44.5, d: 0.516, f: -13.0 },
-  E: { c: 55.4, d: 0.305, f: -34.0 },
-  F: { c: 62.6, d: 0.18, f: -48.6 },
-};
-
-function sigmaYRural(stability: StabilityClass, distance: number): number {
-  const xKm = Math.max(distance, 1) / 1000;
-  return Math.max(SIGMA_Y_A[stability] * Math.pow(xKm, 0.894), 0.1);
+  return {
+    sy: Math.max(sy, 0.1),
+    sz: Math.max(sz, 0.1),
+  };
 }
 
-function sigmaZRural(stability: StabilityClass, distance: number): number {
-  const xKm = Math.max(distance, 1) / 1000;
-  const k = xKm < 1 ? SIGMA_Z_NEAR[stability] : SIGMA_Z_FAR[stability];
-  return Math.max(k.c * Math.pow(xKm, k.d) + k.f, 0.1);
-}
-
+// Briggs / McElroy-Pooler dispersion coefficients for Urban terrain
 function sigmaUrban(stability: StabilityClass, distance: number): { sy: number; sz: number } {
   const x = Math.max(distance, 1);
   switch (stability) {
     case "A":
     case "B":
       return {
-        sy: (0.32 * x) / Math.sqrt(1 + 0.0004 * x),
-        sz: 0.24 * x * Math.sqrt(1 + 0.001 * x),
+        sy: Math.max((0.32 * x) / Math.sqrt(1 + 0.0004 * x), 0.1),
+        sz: Math.max(0.24 * x * Math.sqrt(1 + 0.001 * x), 0.1),
       };
     case "C":
-      return { sy: (0.22 * x) / Math.sqrt(1 + 0.0004 * x), sz: 0.2 * x };
+      return {
+        sy: Math.max((0.22 * x) / Math.sqrt(1 + 0.0004 * x), 0.1),
+        sz: Math.max(0.2 * x, 0.1),
+      };
     case "D":
       return {
-        sy: (0.16 * x) / Math.sqrt(1 + 0.0004 * x),
-        sz: (0.14 * x) / Math.sqrt(1 + 0.0003 * x),
+        sy: Math.max((0.16 * x) / Math.sqrt(1 + 0.0004 * x), 0.1),
+        sz: Math.max((0.14 * x) / Math.sqrt(1 + 0.0003 * x), 0.1),
       };
     default:
       return {
-        sy: (0.11 * x) / Math.sqrt(1 + 0.0004 * x),
-        sz: (0.08 * x) / Math.sqrt(1 + 0.0015 * x),
+        sy: Math.max((0.11 * x) / Math.sqrt(1 + 0.0004 * x), 0.1),
+        sz: Math.max((0.08 * x) / Math.sqrt(1 + 0.0015 * x), 0.1),
       };
   }
 }
@@ -142,14 +141,7 @@ export function dispersionCoefficients(
   terrainType: string,
 ): { sy: number; sz: number } {
   if (terrainType === "urban") return sigmaUrban(stability, distance);
-  return { sy: sigmaYRural(stability, distance), sz: sigmaZRural(stability, distance) };
-}
-
-function effectiveWindSpeed(windSpeed: number, height: number, roughness: number): number {
-  const refHeight = 10;
-  const z0 = Math.max(roughness, 0.01);
-  const z = Math.max(height, 10 * z0, 2);
-  return windSpeed * (Math.log(z / z0) / Math.log(refHeight / z0));
+  return sigmaRural(stability, distance);
 }
 
 function calculateEffectiveReleaseHeight(input: DispersionInput): number {
@@ -168,7 +160,88 @@ function calculateEffectiveReleaseHeight(input: DispersionInput): number {
   return Math.max(h0 + deltaH, 0);
 }
 
-function computeIsotopeCenterlineConcentration(
+function isNobleGas(symbol: string): boolean {
+  return /^(Kr|Xe|Rn|Ar|He|Ne)-\d+/i.test(symbol);
+}
+
+function isIodine(symbol: string): boolean {
+  return /^I-\d+/i.test(symbol);
+}
+
+/**
+ * Computes gravitational & turbulent dry deposition velocity v_d [m/s]
+ * based on physical form and aerodynamic particle size (um).
+ * - Gas / noble gases: v_d = 0 (no dry deposition, no plume depletion)
+ * - Aerosol / Liquid: 0.01–0.10 m/s depending on particle size
+ * - Particle: 0.03–0.12 m/s depending on particle size
+ */
+export function computeDepositionVelocity(
+  symbol: string,
+  form: SourceTerm["physicalForm"] | string,
+  particleSizeUm: number = 1,
+): number {
+  if (isNobleGas(symbol) || form === "gas") {
+    return 0;
+  }
+  const dp = Number.isFinite(particleSizeUm) ? Math.max(particleSizeUm, 0.1) : 1;
+  if (form === "particle") {
+    return Math.min(0.12, Math.max(0.01, 0.03 * Math.pow(dp, 0.45)));
+  }
+  if (isIodine(symbol)) {
+    return Math.min(0.1, Math.max(0.01, 0.01 * Math.pow(dp, 0.35)));
+  }
+  return Math.min(0.1, Math.max(0.005, 0.01 * Math.pow(dp, 0.45)));
+}
+
+/**
+ * Clarke / Chamberlain-Overcamp Gaussian source depletion factor f_dep(x) in (0, 1]
+ * accounting for cumulative dry deposition removal of aerosol/particulate activity upwind of x.
+ */
+export function computeDryDepositionDepletionFactor(
+  distance: number,
+  effHeight: number,
+  windSpeed: number,
+  stability: StabilityClass,
+  terrainType: string,
+  vd: number,
+): number {
+  if (vd <= 0 || distance <= 0) return 1.0;
+
+  const u = Math.max(windSpeed, 0.5);
+  const H = Math.max(effHeight, 0);
+  const coeff = Math.sqrt(2 / Math.PI) * (vd / u);
+
+  const steps = 24;
+  const dx = distance / steps;
+  let integral = 0;
+
+  for (let i = 0; i < steps; i++) {
+    const xMid = (i + 0.5) * dx;
+    const { sz } = dispersionCoefficients(stability, xMid, terrainType);
+    integral += Math.exp(-0.5 * Math.pow(H / sz, 2)) / sz;
+  }
+  integral *= dx;
+
+  return Math.max(0.005, Math.min(1.0, Math.exp(-coeff * integral)));
+}
+
+function wetWashoutCoefficient(
+  precipRateMmH: number,
+  symbol: string,
+  form: SourceTerm["physicalForm"] | string,
+): number {
+  const r = Math.max(0, precipRateMmH || 0);
+  if (r <= 0 || isNobleGas(symbol) || form === "gas") return 0;
+  const baseLambda = isIodine(symbol) ? 3.5e-5 : 8.0e-5;
+  return baseLambda * Math.pow(r, 0.8);
+}
+
+/**
+ * Computes time-integrated centerline Gaussian plume concentration Ψ(x, 0, z) [Bq*s/m^3]
+ * with ground reflection at height z above ground, effective release height H_eff,
+ * and source depletion correction when physicalForm is Aerosol / Particle / Liquid.
+ */
+function computeIsotopeIntegratedConcentration(
   input: DispersionInput,
   distance: number,
   isotopeSymbol: string,
@@ -176,54 +249,67 @@ function computeIsotopeCenterlineConcentration(
   sy: number,
   sz: number,
   effHeight: number,
+  zHeight: number,
 ): number {
-  const { sourceTerm, meteorology, terrain } = input;
+  const { meteorology, sourceTerm, terrain } = input;
   const isotope = getIsotope(isotopeSymbol);
   if (!isotope || activityBq <= 0) return 0;
 
   const isCalm = meteorology.windSpeed < 0.5;
-  const durationSec = Math.max(sourceTerm.releaseDuration, 1e-6) * 3600;
-  const Q0 = activityBq / durationSec;
-
   if (isCalm) {
     const R = Math.max(distance, 1);
     const volume = (4 / 3) * Math.PI * Math.pow(R, 3);
-    const concentration = (activityBq / volume) * Math.exp(-isotope.decayConstant * (R / 0.5));
-    return Math.max(concentration, 0);
+    const transitSec = R / 0.5;
+    const psiCalm =
+      (activityBq / volume) * transitSec * Math.exp(-isotope.decayConstant * transitSec);
+    return Math.max(psiCalm, 0);
   }
 
-  const wind = Math.max(
-    effectiveWindSpeed(meteorology.windSpeed, effHeight, terrain.surfaceRoughness),
-    0.5,
-  );
+  const u = Math.max(meteorology.windSpeed, 0.5);
+  const travelTimeSec = distance / u;
+  const Q = activityBq * Math.exp(-isotope.decayConstant * travelTimeSec);
 
-  const travelTimeSec = distance / wind;
-  const Q = Q0 * Math.exp(-isotope.decayConstant * travelTimeSec);
-
-  const z = Math.max(input.receptorHeight, 0);
+  const z = Math.max(zHeight, 0);
   const L = meteorology.mixingHeight;
 
-  let concentration: number;
-  if (L > 0 && sz > 1.2 * L) {
-    concentration = Q / (Math.sqrt(2 * Math.PI) * sy * L * wind);
+  let psi: number;
+  if (L > 0 && sz > 0.8 * L) {
+    psi = Q / (Math.sqrt(2 * Math.PI) * u * sy * L);
   } else {
     const vertical =
       Math.exp(-Math.pow(z - effHeight, 2) / (2 * sz * sz)) +
       Math.exp(-Math.pow(z + effHeight, 2) / (2 * sz * sz));
-    concentration = (Q / (2 * Math.PI * sy * sz * wind)) * vertical;
+    psi = (Q / (2 * Math.PI * u * sy * sz)) * vertical;
   }
 
-  return Math.max(concentration, 0);
-}
+  // Dry deposition plume depletion (source depletion for Aerosol / Particle / Liquid; 1.0 for Gas)
+  const vd = computeDepositionVelocity(
+    isotopeSymbol,
+    sourceTerm.physicalForm,
+    sourceTerm.particleSize,
+  );
+  if (vd > 0 && distance > 0) {
+    psi *= computeDryDepositionDepletionFactor(
+      distance,
+      effHeight,
+      u,
+      meteorology.stabilityClass,
+      terrain.terrainType,
+      vd,
+    );
+  }
 
-function depositionVelocity(form: string): number {
-  if (form === "gas") return 0.001;
-  if (form === "particle") return 0.02;
-  return 0.01;
-}
+  // Wet precipitation washout depletion during transit
+  const washoutLambda = wetWashoutCoefficient(
+    meteorology.precipitationRate,
+    isotopeSymbol,
+    sourceTerm.physicalForm,
+  );
+  if (washoutLambda > 0 && distance > 0) {
+    psi *= Math.exp(-washoutLambda * travelTimeSec);
+  }
 
-function isIodine(symbol: string): boolean {
-  return /^I-\d+/i.test(symbol);
+  return Math.max(psi, 0);
 }
 
 interface PathwayDoses {
@@ -239,13 +325,15 @@ interface PathwayDoses {
 }
 
 function computeIsotopeDoses(
-  concentration: number,
+  psiBreathing: number,
+  psiGround: number,
   input: DispersionInput,
   isotopeSymbol: string,
+  distance: number,
 ): PathwayDoses {
-  const { sourceTerm } = input;
+  const { sourceTerm, meteorology } = input;
   const isotope = getIsotope(isotopeSymbol);
-  if (!isotope || concentration <= 0) {
+  if (!isotope || (psiBreathing <= 0 && psiGround <= 0)) {
     return {
       plumeDeposition: 0,
       externalDose: 0,
@@ -259,30 +347,72 @@ function computeIsotopeDoses(
     };
   }
 
-  const exposureDuration = Math.min(
-    input.averagingTime || 3600,
-    Math.max(sourceTerm.releaseDuration, 1e-6) * 3600,
+  // Cloud immersion dose [Sv]: Psi [Bq*s/m^3] * DCF_cloud [Sv*m^3/(Bq*s)]
+  const cloudDoseSv = psiBreathing * isotope.doseRateConstant;
+
+  // Inhalation committed effective dose [Sv]: Psi [Bq*s/m^3] * BR [m^3/s] * DCF_inh [Sv/Bq]
+  const inhalationDoseSv = psiBreathing * BREATHING_RATE * isotope.inhalationCoefficient;
+
+  // Ground surface deposition W [Bq/m^2]: dry deposition Vd * Psi(z=0) + wet washout
+  const vd = computeDepositionVelocity(
+    isotope.symbol,
+    sourceTerm.physicalForm,
+    sourceTerm.particleSize,
   );
+  const dryDeposition = psiGround * vd;
 
-  const cloudDoseSv = concentration * isotope.doseRateConstant * exposureDuration;
-  const inhalationDoseSv =
-    concentration * BREATHING_RATE * exposureDuration * isotope.inhalationCoefficient;
+  const u = Math.max(meteorology.windSpeed, 0.5);
+  const washoutLambda = wetWashoutCoefficient(
+    meteorology.precipitationRate,
+    isotope.symbol,
+    sourceTerm.physicalForm,
+  );
+  let wetDeposition = 0;
+  if (washoutLambda > 0 && distance > 0) {
+    const { sy } = dispersionCoefficients(
+      meteorology.stabilityClass,
+      distance,
+      input.terrain.terrainType,
+    );
+    const mixItem = getNormalizedSourceMix(sourceTerm).find((m) => m.isotope === isotopeSymbol);
+    const activityBq = mixItem?.activityBq ?? 0;
+    const transitSec = distance / u;
+    const fDry =
+      vd > 0
+        ? computeDryDepositionDepletionFactor(
+            distance,
+            calculateEffectiveReleaseHeight(input),
+            u,
+            meteorology.stabilityClass,
+            input.terrain.terrainType,
+            vd,
+          )
+        : 1.0;
+    const qEff =
+      activityBq * fDry * Math.exp(-(isotope.decayConstant + washoutLambda) * transitSec);
+    wetDeposition = (washoutLambda * qEff) / (u * Math.sqrt(2 * Math.PI) * sy);
+  }
+  const plumeDeposition = dryDeposition + wetDeposition;
 
-  // Плотность поверхностного загрязнения [Bq/m^2]
-  const plumeDeposition =
-    concentration * depositionVelocity(sourceTerm.physicalForm) * exposureDuration;
+  // Ground shine dose [Sv] integrated over acute exposure duration (default 4h = 14400 s)
+  const groundExpSec = input.averagingTime > 0 ? input.averagingTime : 14400;
+  const effGroundTimeSec =
+    isotope.decayConstant > 0
+      ? (1 - Math.exp(-isotope.decayConstant * groundExpSec)) / isotope.decayConstant
+      : groundExpSec;
+  const groundShineDoseSv = plumeDeposition * isotope.externalDoseCoefficient * effGroundTimeSec;
 
-  // Доза от подстилающей поверхности
-  const groundShineDoseSv = plumeDeposition * isotope.externalDoseCoefficient;
+  // Skin equivalent dose [Sv] & secondary ingestion indicator [Sv]
+  const skinDoseSv = cloudDoseSv * 1.5 + groundShineDoseSv * 1.2;
+  const ingestionEquivalentSv = plumeDeposition * 1e-4 * isotope.ingestionCoefficient;
 
-  // Эквивалентная доза на кожу
-  const skinDoseSv = cloudDoseSv * 1.5 + plumeDeposition * 2.2;
-  const ingestionEquivalentSv = plumeDeposition * 0.8 * (isotope.inhalationCoefficient * 0.5);
-
-  // Эффективная доза (классическое суммирование основных путей облучения)
+  // Total Effective Dose Equivalent (TEDE) [Sv]
   const totalDoseSv = cloudDoseSv + inhalationDoseSv + groundShineDoseSv;
 
-  const thyroidDose = isIodine(isotope.symbol) ? inhalationDoseSv / 0.05 : totalDoseSv;
+  // Thyroid dose [Sv] (ICRP tissue weighting factor w_T = 0.05 for radioiodine inhalation)
+  const thyroidDose = isIodine(isotope.symbol)
+    ? inhalationDoseSv / 0.05 + cloudDoseSv + groundShineDoseSv
+    : totalDoseSv;
 
   return {
     plumeDeposition,
@@ -310,6 +440,7 @@ export function computeMixtureAtDistance(
   const { meteorology, terrain, sourceTerm } = input;
   const isCalm = meteorology.windSpeed < 0.5;
   const effHeight = calculateEffectiveReleaseHeight(input);
+  const receptorZ = Math.max(input.receptorHeight ?? 1.5, 0);
 
   const { sy, sz } = isCalm
     ? { sy: Math.max(distance, 1), sz: Math.max(distance, 1) }
@@ -328,11 +459,11 @@ export function computeMixtureAtDistance(
     totalEffectiveDose: 0,
     thyroidDose: 0,
   };
-  let totalConcentration = 0;
+  let totalPsi = 0;
   const nuclideBreakdown: NuclideDistanceContribution[] = [];
 
   for (const item of mix) {
-    const conc = computeIsotopeCenterlineConcentration(
+    const psiBreathing = computeIsotopeIntegratedConcentration(
       input,
       distance,
       item.isotope,
@@ -340,11 +471,22 @@ export function computeMixtureAtDistance(
       sy,
       sz,
       effHeight,
+      receptorZ,
     );
-    const isoDoses = computeIsotopeDoses(conc, input, item.isotope);
+    const psiGround = computeIsotopeIntegratedConcentration(
+      input,
+      distance,
+      item.isotope,
+      item.activityBq,
+      sy,
+      sz,
+      effHeight,
+      0,
+    );
+    const isoDoses = computeIsotopeDoses(psiBreathing, psiGround, input, item.isotope, distance);
     const isoMeta = getIsotope(item.isotope);
 
-    totalConcentration += conc;
+    totalPsi += psiBreathing;
     totalDoses.plumeDeposition += isoDoses.plumeDeposition;
     totalDoses.externalDose += isoDoses.externalDose;
     totalDoses.cloudDose += isoDoses.cloudDose;
@@ -360,13 +502,13 @@ export function computeMixtureAtDistance(
       isotope: item.isotope,
       name: isoMeta?.name ?? item.isotope,
       activityBq: item.activityBq,
-      concentration: conc,
+      concentration: psiBreathing,
       ...isoDoses,
     });
   }
 
   return {
-    concentration: totalConcentration,
+    concentration: totalPsi,
     sy,
     sz,
     doses: totalDoses,

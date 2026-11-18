@@ -46,11 +46,11 @@ export function calculateDispersionCoefficients(
   switch (stability) {
     case "A":
       rawSigmaY = 0.22 * x * Math.pow(1 + 0.0001 * x, -0.5);
-      rawSigmaZ = 0.2 * x;
+      rawSigmaZ = 0.2 * x * Math.sqrt(1 + 0.0003 * x);
       break;
     case "B":
       rawSigmaY = 0.16 * x * Math.pow(1 + 0.0001 * x, -0.5);
-      rawSigmaZ = 0.12 * x;
+      rawSigmaZ = 0.12 * x * Math.sqrt(1 + 0.0001 * x);
       break;
     case "C":
       rawSigmaY = 0.11 * x * Math.pow(1 + 0.0001 * x, -0.5);
@@ -58,23 +58,22 @@ export function calculateDispersionCoefficients(
       break;
     case "D":
       rawSigmaY = 0.08 * x * Math.pow(1 + 0.0001 * x, -0.5);
-      rawSigmaZ = 0.06 * x * Math.pow(1 + 0.0015 * x, -0.5);
+      rawSigmaZ = 0.06 * x * Math.pow(1 + 0.001 * x, -0.5);
       break;
     case "E":
       rawSigmaY = 0.06 * x * Math.pow(1 + 0.0001 * x, -0.5);
-      rawSigmaZ = 0.03 * x * Math.pow(1 + 0.0003 * x, -1.0);
+      rawSigmaZ = 0.03 * x * Math.pow(1 + 0.0003 * x, -0.5);
       break;
     case "F":
     default:
       rawSigmaY = 0.04 * x * Math.pow(1 + 0.0001 * x, -0.5);
-      rawSigmaZ = 0.016 * x * Math.pow(1 + 0.0003 * x, -1.0);
+      rawSigmaZ = 0.02 * x * Math.pow(1 + 0.0003 * x, -0.5);
       break;
   }
 
-  // Physical stack orifice size added in quadrature:
-  // σ_y0 ≈ 2.5m, σ_z0 ≈ 1.5m prevents mathematical singularity at x=0
-  const sigmaY0 = 2.5;
-  const sigmaZ0 = 1.5;
+  // Minimal orifice regularization (0.2m) prevents x=0 singularity without distorting near-field Briggs sigma at 30m
+  const sigmaY0 = 0.2;
+  const sigmaZ0 = 0.2;
 
   return {
     sigmaY: Math.sqrt(rawSigmaY * rawSigmaY + sigmaY0 * sigmaY0),

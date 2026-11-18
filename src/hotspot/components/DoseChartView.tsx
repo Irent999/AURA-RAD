@@ -647,8 +647,8 @@ export function DoseChartView({ result }: { result: DispersionResult }) {
                 );
               })}
 
-            {xAxisTicks.map((t) => (
-              <g key={`xt-${t.distance}`}>
+            {xAxisTicks.map((t, idx) => (
+              <g key={`xt-${t.distance}-${idx}`}>
                 <line
                   x1={t.x}
                   y1={padTop}

@@ -35,7 +35,7 @@ import {
   formatHotSpotReportCsv,
   formatHotSpotReportJson,
 } from "./multiNuclideAssessment";
-import { getNormalizedSourceMix } from "../../../hotspot/lib/dispersion";
+import { computeDepositionVelocity, getNormalizedSourceMix } from "../../../hotspot/lib/dispersion";
 import {
   fetchCurrentMeteo,
   calculateTransportVector,
@@ -72,6 +72,11 @@ function mapDispersionInputToNuclides(input: DispersionInput): NuclideReleaseIte
       enabled: true,
       nameRu: iso.nameRu,
       category: iso.category,
+      depositionVelocityMs: computeDepositionVelocity(
+        iso.symbol,
+        input.sourceTerm.physicalForm,
+        input.sourceTerm.particleSize,
+      ),
     };
   });
 }
