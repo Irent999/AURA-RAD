@@ -48,6 +48,8 @@ export interface SourceTerm {
   particleSize: number;
   latitude: number;
   longitude: number;
+  plantModelScale?: number; // Масштаб 3D-модели АЭС (1.0 = 1:1 в метрах)
+  plantBearingDeg?: number; // Азимут / поворот 3D-модели АЭС (°)
   stackTemperature?: number; // Температура выброса газов из трубы (°C)
 }
 
@@ -130,6 +132,7 @@ export interface DispersionResult {
   maxDoseDistance: { distance: number; value: number };
   plumeFootprint: { x: number; y: number; concentration: number; dose?: number }[];
   geoFootprint: { lat: number; lon: number; concentration: number; dose?: number }[];
+  releaseOrigin?: { lat: number; lon: number };
   isodoseContours?: IsodoseContour2D[];
   decayChainResult: { time: number; activities: { symbol: string; activity: number }[] }[];
   rk45Stats: { steps: number; accepted: number; rejected: number; finalTime: number };

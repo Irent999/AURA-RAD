@@ -17,6 +17,14 @@ import {
   calculateMultiNuclidePointDose,
 } from "./gaussianPlume3D";
 import { loadMapTextureAsync, JIZZAKH_NPP_LAT, JIZZAKH_NPP_LON } from "./mapTextureGenerator";
+import {
+  DEFAULT_PLANT_BEARING_DEG,
+  DEFAULT_PLANT_MODEL_SCALE,
+  generateVVER1200Plant,
+  getVVER1200StackWorldPosition,
+  disposeVVER1200Plant,
+  type VVER1200PlantMetadata,
+} from "../../../3d/generateVVER1200Plant";
 
 interface Plume3DCanvasProps {
   source: PlumeSource3D;
@@ -37,6 +45,8 @@ interface Plume3DCanvasProps {
   cameraPreset: "perspective" | "top" | "side" | "downwind" | "source";
   onCameraPresetSettled?: () => void;
   isSimulating: boolean;
+  plantBearingDeg?: number;
+  plantScaleMultiplier?: number;
 }
 
 // Pre-allocated math helpers to ensure zero GC in the render loop
@@ -48,6 +58,7 @@ const _colorStopHigh = new THREE.Color(0.95, 0.28, 0.06); // ~8 mSv/h orange-red
 const _colorStopCrit = new THREE.Color(1.0, 0.06, 0.24); // >= 30 mSv/h crimson
 const _raycaster = new THREE.Raycaster();
 const _mouse = new THREE.Vector2();
+const _stackWorldPos = new THREE.Vector3();
 
 export function Plume3DCanvas({
   source,
@@ -68,6 +79,8 @@ export function Plume3DCanvas({
   cameraPreset,
   onCameraPresetSettled,
   isSimulating,
+  plantBearingDeg = DEFAULT_PLANT_BEARING_DEG,
+  plantScaleMultiplier = DEFAULT_PLANT_MODEL_SCALE,
 }: Plume3DCanvasProps) {
   const mountRef = useRef<HTMLDivElement>(null);
 
@@ -102,6 +115,7 @@ export function Plume3DCanvas({
   const probeMeshRef = useRef<THREE.Group | null>(null);
   const peakMarkerRef = useRef<THREE.Group | null>(null);
   const windArrowGroupRef = useRef<THREE.Group | null>(null);
+  const plantGroupRef = useRef<THREE.Group | null>(null);
 
   // Camera animation target
   const cameraTargetRef = useRef<{
@@ -128,6 +142,8 @@ export function Plume3DCanvas({
     showIsolines,
     showCenterline,
     isSimulating,
+    plantBearingDeg,
+    plantScaleMultiplier,
     onProbeMove,
     onCameraPresetSettled,
   });
@@ -145,6 +161,8 @@ export function Plume3DCanvas({
       showIsolines,
       showCenterline,
       isSimulating,
+      plantBearingDeg,
+      plantScaleMultiplier,
       onProbeMove,
       onCameraPresetSettled,
     };
@@ -161,6 +179,8 @@ export function Plume3DCanvas({
     showIsolines,
     showCenterline,
     isSimulating,
+    plantBearingDeg,
+    plantScaleMultiplier,
     onProbeMove,
     onCameraPresetSettled,
   ]);
@@ -192,9 +212,9 @@ export function Plume3DCanvas({
           targetLookAt = new THREE.Vector3(0, source.effectiveHeight, 0);
           break;
         case "source":
-          // Close-up at release stack / reactor building
-          targetPos = new THREE.Vector3(-140, 110, -140);
-          targetLookAt = new THREE.Vector3(0, source.effectiveHeight * 0.7, 0);
+          // Close-up framing the L-shaped 1920m VVER-1200 complex, switchyard, and 4 cooling towers
+          targetPos = new THREE.Vector3(-1050, 920, 1250);
+          targetLookAt = new THREE.Vector3(-80, 45, 20);
           break;
         case "perspective":
         default:
@@ -257,8 +277,8 @@ export function Plume3DCanvas({
     scene.fog = new THREE.FogExp2("#080c12", 0.0003);
     sceneRef.current = scene;
 
-    // 3. Camera & OrbitControls
-    const camera = new THREE.PerspectiveCamera(45, width / height, 5, 30000);
+    // 3. Camera & OrbitControls (tight near=0.5 prevents clipping during close zoom)
+    const camera = new THREE.PerspectiveCamera(45, width / height, 0.5, 50000);
     camera.position.set(650, 420, 850);
     cameraRef.current = camera;
 
@@ -266,7 +286,7 @@ export function Plume3DCanvas({
     controls.enableDamping = !isSoftwareGl;
     controls.dampingFactor = 0.06;
     controls.maxPolarAngle = Math.PI / 2 - 0.02; // Prevent going beneath terrain
-    controls.minDistance = 20;
+    controls.minDistance = 8;
     controls.maxDistance = 12000;
     controlsRef.current = controls;
 
@@ -287,7 +307,7 @@ export function Plume3DCanvas({
       dirLight.shadow.mapSize.height = 1024;
       dirLight.shadow.camera.near = 100;
       dirLight.shadow.camera.far = 5000;
-      const d = 1400;
+      const d = 1800;
       dirLight.shadow.camera.left = -d;
       dirLight.shadow.camera.right = d;
       dirLight.shadow.camera.top = d;
@@ -342,91 +362,25 @@ export function Plume3DCanvas({
     scene.add(groundMesh);
     groundMeshRef.current = groundMesh;
 
-    // 6. Procedural Composite Industrial Facility (Release Stack & Reactor)
-    const facilityGroup = new THREE.Group();
-    facilityGroup.position.set(source.position.x, 0, source.position.z);
-
-    // Reinforced Concrete Foundation Pad
-    const baseGeo = new THREE.BoxGeometry(64, 6, 64);
-    const baseMat = new THREE.MeshStandardMaterial({
-      color: "#334155",
-      roughness: 0.85,
-      metalness: 0.2,
+    // 6. Procedural Twin-Unit VVER-1200 Nuclear Power Plant Complex (2 Reactors + 4 Cooling Towers)
+    const plantGroup = generateVVER1200Plant({
+      bearingDeg: propsRef.current.plantBearingDeg,
+      scaleMultiplier: propsRef.current.plantScaleMultiplier,
+      stackHeight: Math.max(25, source.effectiveHeight),
+      includeLighting: false,
+      enableShadows: !isSoftwareGl,
     });
-    const baseMesh = new THREE.Mesh(baseGeo, baseMat);
-    baseMesh.position.y = 3;
-    baseMesh.castShadow = !isSoftwareGl;
-    baseMesh.receiveShadow = !isSoftwareGl;
-    facilityGroup.add(baseMesh);
+    plantGroup.position.set(source.position.x, 0, source.position.z);
 
-    // Reactor Containment Structure
-    const buildingGeo = new THREE.BoxGeometry(38, 24, 38);
-    const buildingMat = new THREE.MeshStandardMaterial({
-      color: "#475569",
-      roughness: 0.7,
-      metalness: 0.3,
-    });
-    const buildingMesh = new THREE.Mesh(buildingGeo, buildingMat);
-    buildingMesh.position.set(-10, 15, -10);
-    buildingMesh.castShadow = !isSoftwareGl;
-    facilityGroup.add(buildingMesh);
-
-    const domeGeo = new THREE.SphereGeometry(14, 24, 16, 0, Math.PI * 2, 0, Math.PI / 2);
-    const domeMat = new THREE.MeshStandardMaterial({
-      color: "#64748b",
-      roughness: 0.5,
-      metalness: 0.4,
-    });
-    const domeMesh = new THREE.Mesh(domeGeo, domeMat);
-    domeMesh.position.set(-10, 27, -10);
-    domeMesh.castShadow = !isSoftwareGl;
-    facilityGroup.add(domeMesh);
-
-    // Ventilation Chimney Stack
-    const stackHeight = Math.max(25, source.effectiveHeight);
-    const stackGeo = new THREE.CylinderGeometry(3.5, 5.5, stackHeight, 24);
-    const stackMat = new THREE.MeshStandardMaterial({
-      color: "#e2e8f0",
-      roughness: 0.4,
-      metalness: 0.3,
-    });
-    const stackMesh = new THREE.Mesh(stackGeo, stackMat);
-    stackMesh.position.set(12, stackHeight / 2 + 3, 12);
-    stackMesh.castShadow = !isSoftwareGl;
-    facilityGroup.add(stackMesh);
-
-    // Aviation Red Warning Bands
-    const bandHeight = stackHeight * 0.12;
-    const bandGeo = new THREE.CylinderGeometry(3.6, 3.8, bandHeight, 24);
-    const bandMat = new THREE.MeshStandardMaterial({
-      color: "#ef4444",
-      roughness: 0.4,
-      metalness: 0.2,
-    });
-    const bandMesh1 = new THREE.Mesh(bandGeo, bandMat);
-    bandMesh1.position.set(12, stackHeight * 0.75 + 3, 12);
-    facilityGroup.add(bandMesh1);
-
-    const bandMesh2 = new THREE.Mesh(bandGeo, bandMat);
-    bandMesh2.position.set(12, stackHeight * 0.45 + 3, 12);
-    facilityGroup.add(bandMesh2);
-
-    // Flashing Hazard Beacon
-    const beaconGeo = new THREE.SphereGeometry(1.5, 12, 12);
-    const beaconMat = new THREE.MeshBasicMaterial({ color: "#ff2222" });
-    const beaconMesh = new THREE.Mesh(beaconGeo, beaconMat);
-    beaconMesh.position.set(12, stackHeight + 4, 12);
-    facilityGroup.add(beaconMesh);
-
-    // Contact Shadow Plane
-    const contactGeo = new THREE.PlaneGeometry(90, 90);
+    // Subtle ground contact shadow beneath the L-shaped NPP industrial pad
+    const contactGeo = new THREE.PlaneGeometry(2100, 2000);
     const contactCanvas = document.createElement("canvas");
     contactCanvas.width = 128;
     contactCanvas.height = 128;
     const ctx = contactCanvas.getContext("2d")!;
-    const grad = ctx.createRadialGradient(64, 64, 5, 64, 64, 60);
-    grad.addColorStop(0, "rgba(0, 0, 0, 0.75)");
-    grad.addColorStop(0.5, "rgba(0, 0, 0, 0.35)");
+    const grad = ctx.createRadialGradient(64, 64, 10, 64, 64, 62);
+    grad.addColorStop(0, "rgba(0, 0, 0, 0.38)");
+    grad.addColorStop(0.65, "rgba(0, 0, 0, 0.14)");
     grad.addColorStop(1, "rgba(0, 0, 0, 0)");
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, 128, 128);
@@ -435,14 +389,18 @@ export function Plume3DCanvas({
       map: contactTexture,
       transparent: true,
       depthWrite: false,
-      opacity: 0.75,
+      opacity: 0.55,
     });
     const contactMesh = new THREE.Mesh(contactGeo, contactMat);
     contactMesh.rotation.x = -Math.PI / 2;
-    contactMesh.position.y = 0.25;
-    facilityGroup.add(contactMesh);
+    contactMesh.position.set(-120, 0.25, 20);
+    plantGroup.add(contactMesh);
 
-    scene.add(facilityGroup);
+    const plantMeta = plantGroup.userData?.vver1200 as VVER1200PlantMetadata | undefined;
+    plantMeta?.textures.push(contactTexture);
+
+    scene.add(plantGroup);
+    plantGroupRef.current = plantGroup;
 
     // 7. Dynamic Volumetric Particle System (Gaussian Radioactive Plume)
     const count = particleDensity === "high" ? 6000 : particleDensity === "medium" ? 3500 : 1800;
@@ -496,25 +454,28 @@ export function Plume3DCanvas({
     particlesGeo.setAttribute("size", new THREE.BufferAttribute(sizes, 1));
 
     const particlesMat = new THREE.PointsMaterial({
-      size: 35,
+      size: 38,
       map: particleTexture,
       vertexColors: true,
       transparent: true,
-      opacity: 0.65,
+      opacity: 0.72,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     });
 
     const particles = new THREE.Points(particlesGeo, particlesMat);
+    particles.renderOrder = 20;
     scene.add(particles);
     particlesRef.current = particles;
 
     // 8. Protective Zones & Isolines Visual Groups
     const zonesGroup = new THREE.Group();
+    zonesGroup.renderOrder = 10;
     scene.add(zonesGroup);
     zonesGroupRef.current = zonesGroup;
 
     const isolinesGroup = new THREE.Group();
+    isolinesGroup.renderOrder = 11;
     scene.add(isolinesGroup);
     isolinesGroupRef.current = isolinesGroup;
 
@@ -524,9 +485,11 @@ export function Plume3DCanvas({
       color: "#06b6d4",
       linewidth: 2,
       transparent: true,
-      opacity: 0.8,
+      opacity: 0.85,
+      depthTest: false,
     });
     const centerlineLine = new THREE.Line(centerlineGeo, centerlineMat);
+    centerlineLine.renderOrder = 21;
     scene.add(centerlineLine);
     centerlineLineRef.current = centerlineLine;
 
@@ -694,8 +657,24 @@ export function Plume3DCanvas({
       }
       controls.update();
 
-      // Beacon flashing
-      beaconMesh.material.color.setHex(now % 1000 < 500 ? 0xff2222 : 0x440000);
+      // Beacon flashing on ventilation stack & reactor domes
+      const plantMetaRef = plantGroupRef.current?.userData?.vver1200 as
+        VVER1200PlantMetadata | undefined;
+      if (plantMetaRef?.beaconMeshes) {
+        const beaconHex = now % 1000 < 500 ? 0xff2222 : 0x440000;
+        for (let b = 0; b < plantMetaRef.beaconMeshes.length; b++) {
+          (plantMetaRef.beaconMeshes[b]!.material as THREE.MeshBasicMaterial).color.setHex(
+            beaconHex,
+          );
+        }
+      }
+
+      // Compute exact world position of the VVER-1200 ventilation stack emission tip
+      if (plantGroupRef.current) {
+        getVVER1200StackWorldPosition(plantGroupRef.current, _stackWorldPos);
+      } else {
+        _stackWorldPos.set(src.position.x, src.effectiveHeight, src.position.z);
+      }
 
       // Update wind compass orientation
       if (windArrowGroupRef.current) {
@@ -724,7 +703,7 @@ export function Plume3DCanvas({
       if (zonesGroupRef.current) zonesGroupRef.current.visible = sz;
       if (isolinesGroupRef.current) isolinesGroupRef.current.visible = si;
 
-      // Centerline trajectory line
+      // Centerline trajectory line starting strictly from the ventilation stack tip
       if (centerlineLineRef.current) {
         centerlineLineRef.current.visible = sc;
         const windTravelRad = (((met.windDirectionDeg + 180) % 360) * Math.PI) / 180;
@@ -732,7 +711,13 @@ export function Plume3DCanvas({
         const dwZ = -Math.cos(windTravelRad);
         const pts: THREE.Vector3[] = [];
         for (let d = 0; d <= 6000; d += 100) {
-          pts.push(new THREE.Vector3(dwX * d, src.effectiveHeight, dwZ * d));
+          pts.push(
+            new THREE.Vector3(
+              _stackWorldPos.x + dwX * d,
+              _stackWorldPos.y,
+              _stackWorldPos.z + dwZ * d,
+            ),
+          );
         }
         centerlineLineRef.current.geometry.setFromPoints(pts);
       }
@@ -754,9 +739,9 @@ export function Plume3DCanvas({
         const unitCwX = Math.cos(windTravelRad);
         const unitCwZ = Math.sin(windTravelRad);
 
-        const stackX = src.position.x;
-        const stackZ = src.position.z;
-        const effH = src.effectiveHeight;
+        const stackX = _stackWorldPos.x;
+        const stackZ = _stackWorldPos.z;
+        const effH = _stackWorldPos.y;
 
         for (let i = 0; i < pCount; i++) {
           if (simActive) {
@@ -852,12 +837,28 @@ export function Plume3DCanvas({
       resizeObserver.disconnect();
       window.removeEventListener("resize", handleResize);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
+      if (plantGroupRef.current) {
+        disposeVVER1200Plant(plantGroupRef.current);
+        plantGroupRef.current = null;
+      }
       renderer.dispose();
       if (container.contains(renderer.domElement)) {
         container.removeChild(renderer.domElement);
       }
     };
   }, [source.position.x, source.position.z, source.effectiveHeight, particleDensity]);
+
+  // Reactively update VVER-1200 azimuth bearing and scale without rebuilding the scene
+  useEffect(() => {
+    const group = plantGroupRef.current;
+    if (!group) return;
+    group.rotation.y = -THREE.MathUtils.degToRad(plantBearingDeg);
+    const safeScale =
+      Number.isFinite(plantScaleMultiplier) && plantScaleMultiplier > 0
+        ? plantScaleMultiplier
+        : 1.0;
+    group.scale.setScalar(safeScale);
+  }, [plantBearingDeg, plantScaleMultiplier]);
 
   // Update Geographic Map Texture when mapStyle or source coordinates change
   useEffect(() => {
@@ -917,11 +918,13 @@ export function Plume3DCanvas({
         color: zone.colorHex,
         side: THREE.DoubleSide,
         transparent: true,
-        opacity: 0.65,
+        opacity: 0.68,
+        depthTest: false,
       });
       const ringMesh = new THREE.Mesh(ringGeo, ringMat);
       ringMesh.rotation.x = -Math.PI / 2;
-      ringMesh.position.y = 0.4;
+      ringMesh.position.y = 4.2;
+      ringMesh.renderOrder = 10;
       group.add(ringMesh);
     });
   }, [zones, showZones]);
@@ -940,7 +943,7 @@ export function Plume3DCanvas({
     if (!showIsolines || isolines.length === 0) return;
 
     isolines.forEach((iso) => {
-      const pts = iso.points.map((p) => new THREE.Vector3(p.x, 0.45, p.z));
+      const pts = iso.points.map((p) => new THREE.Vector3(p.x, 4.5, p.z));
       if (pts.length > 2) {
         pts.push(pts[0]!.clone()); // Close loop
         const lineGeo = new THREE.BufferGeometry().setFromPoints(pts);
@@ -948,9 +951,11 @@ export function Plume3DCanvas({
           color: iso.colorHex,
           linewidth: 2,
           transparent: true,
-          opacity: 0.85,
+          opacity: 0.9,
+          depthTest: false,
         });
         const line = new THREE.Line(lineGeo, lineMat);
+        line.renderOrder = 11;
         group.add(line);
       }
     });

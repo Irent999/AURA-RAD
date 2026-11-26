@@ -28,6 +28,12 @@ import {
 } from "lucide-react";
 import { Plume3DCanvas } from "./Plume3DCanvas";
 import { JIZZAKH_NPP_LAT, JIZZAKH_NPP_LON } from "./mapTextureGenerator";
+import { isCompleteCoordinateString, parseCoordinateInput } from "../../../3d/geoPlantAdapter";
+import { NppInspectorModal } from "../../../3d/NppInspectorModal";
+import {
+  DEFAULT_PLANT_BEARING_DEG,
+  DEFAULT_PLANT_MODEL_SCALE,
+} from "../../../3d/generateVVER1200Plant";
 import { getExtendedIsotope, filterIsotopesByCategory, bqToCi, ciToBq } from "./isotopes";
 import { calculateMultiNuclidePointDose, worldToPlumeCoordinates } from "./gaussianPlume3D";
 import {
@@ -198,6 +204,18 @@ export function Plume3DView({
   const [siteLon, setSiteLon] = useState<number>(
     syncedInput?.sourceTerm.longitude ?? JIZZAKH_NPP_LON,
   );
+  const [rawLatInput, setRawLatInput] = useState<string>(() =>
+    String(syncedInput?.sourceTerm.latitude ?? JIZZAKH_NPP_LAT),
+  );
+  const [rawLonInput, setRawLonInput] = useState<string>(() =>
+    String(syncedInput?.sourceTerm.longitude ?? JIZZAKH_NPP_LON),
+  );
+  const [plantBearingDeg, setPlantBearingDeg] = useState<number>(
+    syncedInput?.sourceTerm.plantBearingDeg ?? DEFAULT_PLANT_BEARING_DEG,
+  );
+  const [plantScaleMultiplier, setPlantScaleMultiplier] = useState<number>(
+    syncedInput?.sourceTerm.plantModelScale ?? DEFAULT_PLANT_MODEL_SCALE,
+  );
 
   const [windSpeed, setWindSpeed] = useState<number>(syncedInput?.meteorology.windSpeed ?? 5.5);
   const [windDirection, setWindDirection] = useState<number>(
@@ -234,6 +252,7 @@ export function Plume3DView({
     "dose_rate_msvh",
   );
   const [showCenterline, setShowCenterline] = useState<boolean>(true);
+  const [isNppModalOpen, setIsNppModalOpen] = useState<boolean>(false);
   const [particleDensity, setParticleDensity] = useState<"low" | "medium" | "high">("medium");
   const [cameraPreset, setCameraPreset] = useState<
     "perspective" | "top" | "side" | "downwind" | "source"
@@ -263,6 +282,10 @@ export function Plume3DView({
     setReleaseHeight(syncedInput.sourceTerm.releaseHeight);
     setSiteLat(syncedInput.sourceTerm.latitude);
     setSiteLon(syncedInput.sourceTerm.longitude);
+    setRawLatInput(String(syncedInput.sourceTerm.latitude));
+    setRawLonInput(String(syncedInput.sourceTerm.longitude));
+    setPlantBearingDeg(syncedInput.sourceTerm.plantBearingDeg ?? DEFAULT_PLANT_BEARING_DEG);
+    setPlantScaleMultiplier(syncedInput.sourceTerm.plantModelScale ?? DEFAULT_PLANT_MODEL_SCALE);
     setWindSpeed(syncedInput.meteorology.windSpeed);
     setWindDirection(syncedInput.meteorology.windDirection);
     setStabilityClass(syncedInput.meteorology.stabilityClass);
@@ -277,6 +300,8 @@ export function Plume3DView({
     releaseHeight?: number;
     latitude?: number;
     longitude?: number;
+    plantModelScale?: number;
+    plantBearingDeg?: number;
     windSpeed?: number;
     windDirection?: number;
     stabilityClass?: StabilityClass;
@@ -306,6 +331,8 @@ export function Plume3DView({
         releaseHeight: overrides?.releaseHeight ?? releaseHeight,
         latitude: overrides?.latitude ?? siteLat,
         longitude: overrides?.longitude ?? siteLon,
+        plantModelScale: overrides?.plantModelScale ?? plantScaleMultiplier,
+        plantBearingDeg: overrides?.plantBearingDeg ?? plantBearingDeg,
       },
       meteorology: {
         ...base.meteorology,
@@ -662,6 +689,8 @@ export function Plume3DView({
           particleDensity={particleDensity}
           cameraPreset={cameraPreset}
           isSimulating={isSimulating}
+          plantBearingDeg={plantBearingDeg}
+          plantScaleMultiplier={plantScaleMultiplier}
         />
       </div>
 
@@ -746,6 +775,14 @@ export function Plume3DView({
             >
               <Radio className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Зонд</span>
+            </button>
+            <button
+              onClick={() => setIsNppModalOpen(true)}
+              title="Открыть 3D-инспектор АЭС (GLB, 4 сценария, режим МЧС)"
+              className="px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors bg-amber-500/15 text-amber-300 border border-amber-500/35 hover:bg-amber-500/25 whitespace-nowrap"
+            >
+              <ShieldAlert className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Инспектор АЭС (МЧС)</span>
             </button>
             <button
               onClick={() => setHideAllPanels((v) => !v)}
@@ -1664,41 +1701,113 @@ export function Plume3DView({
 
                     <div>
                       <label className="text-xs text-slate-400 block mb-1.5">
-                        Географическая привязка эпицентра
+                        Географическая привязка АЭС ВВЭР-1200
                       </label>
                       <div className="space-y-2 text-xs">
                         <div>
-                          <span className="text-slate-400">Широта (Lat):</span>
+                          <span className="text-slate-400">Широта (Lat, °):</span>
                           <input
-                            type="number"
-                            step="0.0001"
-                            value={siteLat}
+                            type="text"
+                            inputMode="decimal"
+                            value={rawLatInput}
                             onChange={(e) => {
-                              const val = parseFloat(e.target.value) || JIZZAKH_NPP_LAT;
-                              setSiteLat(val);
-                              pushToSyncedInput({ latitude: val });
+                              const raw = e.target.value;
+                              setRawLatInput(raw);
+                              const parsed = isCompleteCoordinateString(raw);
+                              if (parsed !== null && parsed >= -85 && parsed <= 85) {
+                                setSiteLat(parsed);
+                                pushToSyncedInput({ latitude: parsed });
+                              }
                             }}
-                            className="w-full bg-[#1e293b] border border-slate-700 rounded px-2 py-1 text-white mt-1"
+                            onBlur={() => {
+                              const parsed = parseCoordinateInput(rawLatInput, siteLat);
+                              if (Number.isFinite(parsed) && parsed >= -85 && parsed <= 85) {
+                                setSiteLat(parsed);
+                                setRawLatInput(String(parsed));
+                                pushToSyncedInput({ latitude: parsed });
+                              } else {
+                                setRawLatInput(String(siteLat));
+                              }
+                            }}
+                            className="w-full bg-[#1e293b] border border-slate-700 rounded px-2 py-1 text-white mt-1 font-mono"
                           />
                         </div>
                         <div>
-                          <span className="text-slate-400">Долгота (Lon):</span>
+                          <span className="text-slate-400">Долгота (Lon, °):</span>
                           <input
-                            type="number"
-                            step="0.0001"
-                            value={siteLon}
+                            type="text"
+                            inputMode="decimal"
+                            value={rawLonInput}
                             onChange={(e) => {
-                              const val = parseFloat(e.target.value) || JIZZAKH_NPP_LON;
-                              setSiteLon(val);
-                              pushToSyncedInput({ longitude: val });
+                              const raw = e.target.value;
+                              setRawLonInput(raw);
+                              const parsed = isCompleteCoordinateString(raw);
+                              if (parsed !== null && parsed >= -180 && parsed <= 180) {
+                                setSiteLon(parsed);
+                                pushToSyncedInput({ longitude: parsed });
+                              }
                             }}
-                            className="w-full bg-[#1e293b] border border-slate-700 rounded px-2 py-1 text-white mt-1"
+                            onBlur={() => {
+                              const parsed = parseCoordinateInput(rawLonInput, siteLon);
+                              if (Number.isFinite(parsed) && parsed >= -180 && parsed <= 180) {
+                                setSiteLon(parsed);
+                                setRawLonInput(String(parsed));
+                                pushToSyncedInput({ longitude: parsed });
+                              } else {
+                                setRawLonInput(String(siteLon));
+                              }
+                            }}
+                            className="w-full bg-[#1e293b] border border-slate-700 rounded px-2 py-1 text-white mt-1 font-mono"
                           />
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 pt-1">
+                          <div>
+                            <div className="flex justify-between text-[11px] text-slate-400">
+                              <span>Азимут АЭС</span>
+                              <span className="font-mono text-cyan-300">{plantBearingDeg}°</span>
+                            </div>
+                            <input
+                              type="range"
+                              min={0}
+                              max={360}
+                              step={5}
+                              value={plantBearingDeg}
+                              onChange={(e) => {
+                                const val = Number(e.target.value);
+                                setPlantBearingDeg(val);
+                                pushToSyncedInput({ plantBearingDeg: val });
+                              }}
+                              className="w-full accent-cyan-400"
+                            />
+                          </div>
+                          <div>
+                            <div className="flex justify-between text-[11px] text-slate-400">
+                              <span>Масштаб 3D АЭС</span>
+                              <span className="font-mono text-cyan-300">
+                                {plantScaleMultiplier.toFixed(2)}×
+                              </span>
+                            </div>
+                            <input
+                              type="range"
+                              min={0.2}
+                              max={4.0}
+                              step={0.05}
+                              value={plantScaleMultiplier}
+                              onChange={(e) => {
+                                const val = Number(e.target.value);
+                                setPlantScaleMultiplier(val);
+                                pushToSyncedInput({ plantModelScale: val });
+                              }}
+                              className="w-full accent-cyan-400"
+                            />
+                          </div>
                         </div>
                         <button
                           onClick={() => {
                             setSiteLat(JIZZAKH_NPP_LAT);
                             setSiteLon(JIZZAKH_NPP_LON);
+                            setRawLatInput(String(JIZZAKH_NPP_LAT));
+                            setRawLonInput(String(JIZZAKH_NPP_LON));
                             pushToSyncedInput({
                               latitude: JIZZAKH_NPP_LAT,
                               longitude: JIZZAKH_NPP_LON,
@@ -1706,10 +1815,10 @@ export function Plume3DView({
                           }}
                           className="w-full py-1.5 px-2 rounded bg-cyan-950/70 hover:bg-cyan-900/80 border border-cyan-500/40 text-cyan-300 text-[11px] font-medium transition-colors"
                         >
-                          АЭС Джизак (оз. Тузкан, 40.7084° N, 67.1584° E)
+                          АЭС Джизак (оз. Тузкан, 40.584° N, 67.351° E)
                         </button>
                         <div className="text-[10px] text-slate-400 bg-slate-900/60 p-2 rounded border border-slate-800">
-                          Охват: <strong>12 × 12 км</strong> · Масштаб 1:1 (1 ед = 1 м).
+                          ВВЭР-1200 (2 блока + 4 градирни) · Масштаб 1:1 (1 ед = 1 м).
                         </div>
                       </div>
                     </div>
@@ -2076,6 +2185,24 @@ export function Plume3DView({
           )}
         </div>
       )}
+
+      <NppInspectorModal
+        isOpen={isNppModalOpen}
+        onClose={() => setIsNppModalOpen(false)}
+        lat={siteLat}
+        lon={siteLon}
+        windDirectionDeg={windDirection}
+        windSpeedMs={windSpeed}
+        stabilityClass={stabilityClass}
+        stackHeightM={Math.max(25, releaseHeight || 100)}
+        bearingDeg={plantBearingDeg}
+        calculationType={syncedInput?.calculationType ?? "plume"}
+        onChangeCalculationType={(mode) => {
+          if (syncedInput && onSyncedInputChange) {
+            onSyncedInputChange({ ...syncedInput, calculationType: mode });
+          }
+        }}
+      />
     </div>
   );
 }

@@ -12,6 +12,11 @@ import type {
 } from "./types";
 import { getIsotope } from "./isotopes";
 import { solveDecayChain, type DecayChainResult } from "./rk45";
+import { getVVER1200StackGeoLocation } from "../../3d/geoPlantAdapter";
+import {
+  DEFAULT_PLANT_BEARING_DEG,
+  DEFAULT_PLANT_MODEL_SCALE,
+} from "../../3d/generateVVER1200Plant";
 
 /*
  * All physics uses strict SI base units:
@@ -656,19 +661,44 @@ function metersToLatLon(
   return { lat: lat0 + dLat, lon: lon0 + dLon };
 }
 
+function getStackReleaseOrigin(input: DispersionInput): { lat: number; lon: number } {
+  const stackGeo = getVVER1200StackGeoLocation(
+    input.sourceTerm.latitude,
+    input.sourceTerm.longitude,
+    input.sourceTerm.plantBearingDeg ?? DEFAULT_PLANT_BEARING_DEG,
+    input.sourceTerm.plantModelScale ?? DEFAULT_PLANT_MODEL_SCALE,
+  );
+  return { lat: stackGeo.lat, lon: stackGeo.lon };
+}
+
 function generateGeoFootprint(
   input: DispersionInput,
   localFootprint: { x: number; y: number; concentration: number; dose: number }[],
+  origin: { lat: number; lon: number },
 ): { lat: number; lon: number; concentration: number; dose: number }[] {
-  const lat0 = input.sourceTerm.latitude;
-  const lon0 = input.sourceTerm.longitude;
-  return localFootprint.map((p) => {
-    const geo = metersToLatLon(lat0, lon0, p.x, p.y);
+  const mapped = localFootprint.map((p) => {
+    const geo = metersToLatLon(origin.lat, origin.lon, p.x, p.y);
     return { lat: geo.lat, lon: geo.lon, concentration: p.concentration, dose: p.dose };
   });
+  // Anchor plume heatmap origin right at the ventilation stack mouth
+  if (mapped.length > 0) {
+    return [
+      {
+        lat: origin.lat,
+        lon: origin.lon,
+        concentration: mapped[0].concentration,
+        dose: mapped[0].dose,
+      },
+      ...mapped,
+    ];
+  }
+  return mapped;
 }
 
-function generateGeoIsodoseContours(input: DispersionInput): {
+function generateGeoIsodoseContours(
+  input: DispersionInput,
+  origin: { lat: number; lon: number },
+): {
   contours: IsodoseContour2D[];
   zoneSummary: {
     exclusionZone: number;
@@ -676,8 +706,8 @@ function generateGeoIsodoseContours(input: DispersionInput): {
     ingestionZone: number;
   };
 } {
-  const lat0 = input.sourceTerm.latitude;
-  const lon0 = input.sourceTerm.longitude;
+  const lat0 = origin.lat;
+  const lon0 = origin.lon;
   const isCalm = input.meteorology.windSpeed < 0.5;
   const windRad = (input.meteorology.windDirection * Math.PI) / 180;
   const dwX = Math.sin(windRad);
@@ -831,7 +861,11 @@ export function calculateDispersion(input: DispersionInput): DispersionResult {
     { distance: 0, value: 0 },
   );
 
-  const { contours: isodoseContours, zoneSummary: fineZones } = generateGeoIsodoseContours(input);
+  const releaseOrigin = getStackReleaseOrigin(input);
+  const { contours: isodoseContours, zoneSummary: fineZones } = generateGeoIsodoseContours(
+    input,
+    releaseOrigin,
+  );
 
   let exclusionZone = fineZones.exclusionZone;
   let contaminationZone = fineZones.contaminationZone;
@@ -845,7 +879,7 @@ export function calculateDispersion(input: DispersionInput): DispersionResult {
 
   const protectiveActions = determineProtectiveActions(results, input.sourceTerm);
   const plumeFootprint = generatePlumeFootprint(input, input.distances);
-  const geoFootprint = generateGeoFootprint(input, plumeFootprint);
+  const geoFootprint = generateGeoFootprint(input, plumeFootprint, releaseOrigin);
 
   const normalizedMix = getNormalizedSourceMix(input.sourceTerm);
   const dominantItem = normalizedMix.reduce(
@@ -875,6 +909,7 @@ export function calculateDispersion(input: DispersionInput): DispersionResult {
     maxDoseDistance: maxDose,
     plumeFootprint,
     geoFootprint,
+    releaseOrigin,
     isodoseContours,
     decayChainResult,
     rk45Stats,

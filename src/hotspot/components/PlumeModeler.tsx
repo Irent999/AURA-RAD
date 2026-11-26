@@ -44,6 +44,11 @@ import { PlumeVisualization } from "./PlumeVisualization";
 import { DoseChartView } from "./DoseChartView";
 import { WindRoseView } from "./WindRoseView";
 import { Plume3DView } from "../../renderer/simulation/plume3d";
+import { isCompleteCoordinateString, parseCoordinateInput } from "../../3d/geoPlantAdapter";
+import {
+  DEFAULT_PLANT_BEARING_DEG,
+  DEFAULT_PLANT_MODEL_SCALE,
+} from "../../3d/generateVVER1200Plant";
 
 interface PlumeModelerProps {
   input: DispersionInput;
@@ -94,6 +99,8 @@ export function PlumeModeler({ input, setInput, result, onRunCalculation }: Plum
   const [rawDistancesInput, setRawDistancesInput] = useState<string>(() =>
     input.distances.slice(0, MAX_RECEPTOR_DISTANCES).join(", "),
   );
+  const [rawLatInput, setRawLatInput] = useState<string>(() => String(input.sourceTerm.latitude));
+  const [rawLonInput, setRawLonInput] = useState<string>(() => String(input.sourceTerm.longitude));
   const lastCommittedDistancesRef = useRef<number[]>(input.distances);
 
   useEffect(() => {
@@ -102,6 +109,18 @@ export function PlumeModeler({ input, setInput, result, onRunCalculation }: Plum
       setRawDistancesInput(input.distances.slice(0, MAX_RECEPTOR_DISTANCES).join(", "));
     }
   }, [input.distances]);
+
+  useEffect(() => {
+    if (parseCoordinateInput(rawLatInput, NaN) !== input.sourceTerm.latitude) {
+      setRawLatInput(String(input.sourceTerm.latitude));
+    }
+  }, [input.sourceTerm.latitude]);
+
+  useEffect(() => {
+    if (parseCoordinateInput(rawLonInput, NaN) !== input.sourceTerm.longitude) {
+      setRawLonInput(String(input.sourceTerm.longitude));
+    }
+  }, [input.sourceTerm.longitude]);
 
   const parsedDistances = parseDistancesInput(rawDistancesInput);
 
@@ -466,29 +485,128 @@ export function PlumeModeler({ input, setInput, result, onRunCalculation }: Plum
             <div className="grid grid-cols-2 gap-2">
               <Field label="Latitude (°)">
                 <input
-                  type="number"
-                  className="input-field"
-                  value={input.sourceTerm.latitude}
-                  onChange={(e) =>
-                    update("sourceTerm", "latitude", parseFloat(e.target.value) || 0)
-                  }
-                  step="0.0001"
-                  min="-90"
-                  max="90"
+                  type="text"
+                  inputMode="decimal"
+                  className="input-field font-mono tabular-nums"
+                  value={rawLatInput}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setRawLatInput(next);
+                    const parsed = isCompleteCoordinateString(next);
+                    if (parsed !== null && parsed >= -90 && parsed <= 90) {
+                      update("sourceTerm", "latitude", parsed);
+                    }
+                  }}
+                  onBlur={() => {
+                    const parsed = parseCoordinateInput(rawLatInput, input.sourceTerm.latitude);
+                    const clamped = Math.max(-90, Math.min(90, parsed));
+                    setRawLatInput(String(clamped));
+                    if (clamped !== input.sourceTerm.latitude) {
+                      update("sourceTerm", "latitude", clamped);
+                    }
+                  }}
                 />
               </Field>
               <Field label="Longitude (°)">
                 <input
-                  type="number"
-                  className="input-field"
-                  value={input.sourceTerm.longitude}
-                  onChange={(e) =>
-                    update("sourceTerm", "longitude", parseFloat(e.target.value) || 0)
-                  }
-                  step="0.0001"
-                  min="-180"
-                  max="180"
+                  type="text"
+                  inputMode="decimal"
+                  className="input-field font-mono tabular-nums"
+                  value={rawLonInput}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setRawLonInput(next);
+                    const parsed = isCompleteCoordinateString(next);
+                    if (parsed !== null && parsed >= -180 && parsed <= 180) {
+                      update("sourceTerm", "longitude", parsed);
+                    }
+                  }}
+                  onBlur={() => {
+                    const parsed = parseCoordinateInput(rawLonInput, input.sourceTerm.longitude);
+                    const clamped = Math.max(-180, Math.min(180, parsed));
+                    setRawLonInput(String(clamped));
+                    if (clamped !== input.sourceTerm.longitude) {
+                      update("sourceTerm", "longitude", clamped);
+                    }
+                  }}
                 />
+              </Field>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Scale (×)">
+                <div className="space-y-1">
+                  <input
+                    type="number"
+                    step="0.05"
+                    min="0.2"
+                    max="4"
+                    className="input-field font-mono tabular-nums"
+                    value={input.sourceTerm.plantModelScale ?? DEFAULT_PLANT_MODEL_SCALE}
+                    onChange={(e) => {
+                      const val = parseFloat(e.target.value);
+                      update(
+                        "sourceTerm",
+                        "plantModelScale",
+                        Number.isFinite(val) && val > 0
+                          ? Math.min(4, Math.max(0.2, val))
+                          : DEFAULT_PLANT_MODEL_SCALE,
+                      );
+                    }}
+                  />
+                  <input
+                    type="range"
+                    min="0.2"
+                    max="4"
+                    step="0.05"
+                    value={input.sourceTerm.plantModelScale ?? DEFAULT_PLANT_MODEL_SCALE}
+                    onChange={(e) =>
+                      update(
+                        "sourceTerm",
+                        "plantModelScale",
+                        parseFloat(e.target.value) || DEFAULT_PLANT_MODEL_SCALE,
+                      )
+                    }
+                    className="w-full accent-cyan-400"
+                  />
+                </div>
+              </Field>
+              <Field label="Bearing (°)">
+                <div className="space-y-1">
+                  <input
+                    type="number"
+                    step="1"
+                    min="0"
+                    max="360"
+                    className="input-field font-mono tabular-nums"
+                    value={input.sourceTerm.plantBearingDeg ?? DEFAULT_PLANT_BEARING_DEG}
+                    onChange={(e) => {
+                      const val = parseFloat(e.target.value);
+                      update(
+                        "sourceTerm",
+                        "plantBearingDeg",
+                        Number.isFinite(val)
+                          ? ((val % 360) + 360) % 360
+                          : DEFAULT_PLANT_BEARING_DEG,
+                      );
+                    }}
+                  />
+                  <input
+                    type="range"
+                    min="0"
+                    max="360"
+                    step="1"
+                    value={input.sourceTerm.plantBearingDeg ?? DEFAULT_PLANT_BEARING_DEG}
+                    onChange={(e) => {
+                      const parsed = parseFloat(e.target.value);
+                      update(
+                        "sourceTerm",
+                        "plantBearingDeg",
+                        Number.isFinite(parsed) ? parsed : DEFAULT_PLANT_BEARING_DEG,
+                      );
+                    }}
+                    className="w-full accent-cyan-400"
+                  />
+                </div>
               </Field>
             </div>
           </Section>
@@ -1119,7 +1237,9 @@ function ResultsPanel({
       >
         {activeTab === "table" && <ResultsTable result={result} />}
         {activeTab === "chart" && <DoseChartView result={result} />}
-        {activeTab === "map" && <PlumeVisualization result={result} />}
+        {activeTab === "map" && (
+          <PlumeVisualization result={result} input={input} setInput={setInput} />
+        )}
         {activeTab === "3d" && (
           <Plume3DView syncedInput={input} onSyncedInputChange={setInput} embedded />
         )}

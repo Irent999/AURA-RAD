@@ -104,11 +104,11 @@ export const HeatmapLayer = ({ points }: HeatmapLayerProps) => {
       heatLayer: (latlngs: [number, number, number][], options: Record<string, unknown>) => L.Layer;
     };
     const heatLayer = leafletWithHeat.heatLayer(interpolatedPoints, {
-      radius: 20,
-      blur: 14,
-      maxZoom: 18,
+      radius: 22,
+      blur: 15,
+      maxZoom: 20,
       max: 1.0,
-      minOpacity: 0.35,
+      minOpacity: 0.45,
       gradient: {
         0.15: "#06b6d4",
         0.35: "#10b981",

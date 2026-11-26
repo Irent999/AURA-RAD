@@ -12,6 +12,7 @@ import {
   JIZZAKH_NPP_LAT,
   JIZZAKH_NPP_LON,
 } from "../renderer/simulation/plume3d/mapTextureGenerator";
+import { DEFAULT_PLANT_BEARING_DEG, DEFAULT_PLANT_MODEL_SCALE } from "../3d/generateVVER1200Plant";
 
 export type ViewName = "dashboard" | "modeler" | "plume3d" | "isotopes" | "history";
 
@@ -33,6 +34,8 @@ function App() {
       particleSize: 1,
       latitude: JIZZAKH_NPP_LAT,
       longitude: JIZZAKH_NPP_LON,
+      plantModelScale: DEFAULT_PLANT_MODEL_SCALE,
+      plantBearingDeg: DEFAULT_PLANT_BEARING_DEG,
     },
     meteorology: {
       windSpeed: 5,

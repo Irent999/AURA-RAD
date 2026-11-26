@@ -2,8 +2,8 @@ import * as THREE from "three";
 
 export type MapStyleType = "satellite" | "topographic" | "tactical" | "osm";
 
-export const JIZZAKH_NPP_LAT = 40.7084;
-export const JIZZAKH_NPP_LON = 67.1584;
+export const JIZZAKH_NPP_LAT = 40.584;
+export const JIZZAKH_NPP_LON = 67.351;
 
 export interface MapBoundsInfo {
   centerLat: number;
