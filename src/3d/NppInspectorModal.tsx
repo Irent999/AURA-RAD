@@ -4,7 +4,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
-import { VREmergencySystem } from "./vrEmergencySystem";
+import { VREmergencySystem, type VRTelemetry } from "./vrEmergencySystem";
 import {
   ChevronDown,
   ChevronUp,
@@ -441,9 +441,28 @@ export function NppInspectorModal({
   const [activeExtinguishId, setActiveExtinguishId] = useState<string | null>(null);
   const [hoveredTargetLabel, setHoveredTargetLabel] = useState<string | null>(null);
 
+  const [vrActive, setVrActive] = useState(false);
+  const [fpActive, setFpActive] = useState(false);
+  const [vrStatusMsg, setVrStatusMsg] = useState<string | null>(null);
+  const [vrTelemetry, setVrTelemetry] = useState<VRTelemetry>({
+    doseRate: 0.08,
+    accumulatedDose: 0,
+    hazardLevel: "normal",
+  });
+
   const mountRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const customObjectUrlRef = useRef<string | null>(null);
+
+  const scaledBaseFiresRef = useRef<FireHotspotState[]>(
+    INITIAL_FIRE_HOTSPOTS.map((f) => ({ ...f })),
+  );
+  const scaledBaseEvacsRef = useRef<EvacGroupState[]>(
+    INITIAL_EVAC_GROUPS.map((g) => ({
+      ...g,
+      waypoints: g.waypoints.map((w) => [...w] as [number, number, number]),
+    })),
+  );
 
   const scenarioRef = useRef<AccidentScenarioMode>(activeScenario);
   scenarioRef.current = activeScenario;
@@ -479,12 +498,14 @@ export function NppInspectorModal({
     setActiveScenario(calculationType);
   }, [calculationType]);
 
-  // Escape key exits fullscreen first, then closes modal
+  // Escape key exits first-person / fullscreen first, then closes modal
   useEffect(() => {
     if (!isOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (isFullscreen) {
+        if (fpActive) {
+          vrControlRef.current?.disableFirstPerson();
+        } else if (isFullscreen) {
           setIsFullscreen(false);
         } else {
           onClose();
@@ -493,7 +514,7 @@ export function NppInspectorModal({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isOpen, isFullscreen, onClose]);
+  }, [isOpen, fpActive, isFullscreen, onClose]);
 
   const handleSelectScenario = (mode: AccidentScenarioMode) => {
     setActiveScenario(mode);
@@ -542,8 +563,13 @@ export function NppInspectorModal({
 
   const handleResetEmergency = useCallback(() => {
     setActiveExtinguishId(null);
-    setFires(INITIAL_FIRE_HOTSPOTS.map((f) => ({ ...f })));
-    setEvacGroups(INITIAL_EVAC_GROUPS.map((g) => ({ ...g })));
+    setFires(scaledBaseFiresRef.current.map((f) => ({ ...f })));
+    setEvacGroups(
+      scaledBaseEvacsRef.current.map((g) => ({
+        ...g,
+        waypoints: g.waypoints.map((w) => [...w] as [number, number, number]),
+      })),
+    );
   }, []);
 
   const handleGlbFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -699,15 +725,37 @@ export function NppInspectorModal({
       VVER1200_STACK_LOCAL_POS.z,
     );
 
+    const puffCenterWorld = new THREE.Vector3();
+    let puffRadiusWorld = 70;
+
     const syncStackTipFromModel = (rootObj: THREE.Object3D) => {
       rootObj.updateMatrixWorld(true);
-      const namedTip = rootObj.getObjectByName("VentilationStackTip");
+      let namedTip: THREE.Object3D | undefined;
+      rootObj.traverse((obj) => {
+        if (namedTip) return;
+        const n = (obj.name || "").toLowerCase();
+        if (
+          n === "ventilationstacktip" ||
+          n.includes("ventstack") ||
+          n.includes("stacktip") ||
+          n.includes("chimney")
+        ) {
+          namedTip = obj;
+        }
+      });
       if (namedTip) {
         namedTip.getWorldPosition(stackTipWorld);
       } else {
         const box = new THREE.Box3().setFromObject(rootObj);
+        const size = box.getSize(new THREE.Vector3());
         const center = box.getCenter(new THREE.Vector3());
-        stackTipWorld.set(center.x, box.max.y, center.z);
+        const sx = size.x / 1920;
+        const sz = size.z / 1920;
+        stackTipWorld.set(
+          center.x + VVER1200_STACK_LOCAL_POS.x * sx,
+          Math.max(box.max.y * 0.85, stackHeightRef.current),
+          center.z + VVER1200_STACK_LOCAL_POS.z * sz,
+        );
       }
     };
 
@@ -723,82 +771,99 @@ export function NppInspectorModal({
     let cancelled = false;
     setIsLoadingModel(true);
     setLoadError(null);
-    setLoadProgress(10);
+    setLoadProgress(12);
 
-    gltfLoader.load(
-      glbSourceUrl,
-      (gltf) => {
+    let syncEmergencyTargetsToModel: ((modelBox: THREE.Box3) => void) | null = null;
+
+    const loadValidatedGlb = async () => {
+      try {
+        const res = await fetch(glbSourceUrl);
         if (cancelled) return;
-        const model = gltf.scene;
-
-        // Compute model bounds and align base to y=0, center on X/Z
-        const box = new THREE.Box3().setFromObject(model);
-        const size = box.getSize(new THREE.Vector3());
-        const maxHorizontal = Math.max(size.x, size.z, 1);
-        // Normalize scale to ~1800m span for consistent gameplay
-        if (maxHorizontal < 250 || maxHorizontal > 5500) {
-          const factor = 1800 / maxHorizontal;
-          model.scale.multiplyScalar(factor);
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
         }
-        // Re-align: base at y=0, centered on X/Z
-        const alignedBox = new THREE.Box3().setFromObject(model);
-        const alignedCenter = alignedBox.getCenter(new THREE.Vector3());
-        model.position.x -= alignedCenter.x;
-        model.position.z -= alignedCenter.z;
-        model.position.y -= alignedBox.min.y;
+        const buffer = await res.arrayBuffer();
+        if (cancelled) return;
 
-        model.traverse((child) => {
-          const mesh = child as THREE.Mesh;
-          if (mesh.isMesh) {
-            mesh.castShadow = !isSoftwareGl;
-            mesh.receiveShadow = !isSoftwareGl;
+        const headerBytes = new Uint8Array(buffer.slice(0, 64));
+        const headerText = new TextDecoder().decode(headerBytes).trimStart();
+        const isBinaryGlb =
+          headerBytes.length >= 4 &&
+          headerBytes[0] === 0x67 &&
+          headerBytes[1] === 0x6c &&
+          headerBytes[2] === 0x54 &&
+          headerBytes[3] === 0x46; // "glTF"
+        const isJsonGltf = headerText.startsWith("{");
+
+        if (!isBinaryGlb && !isJsonGltf) {
+          if (headerText.startsWith("version https://git-lfs")) {
+            throw new Error(
+              "Файл является Git LFS-указателем. Поместите реальный assembly.glb в public/ или загрузите .GLB кнопкой выше.",
+            );
           }
-        });
-
-        loadedModelRoot = model;
-        modelContainer.add(model);
-        syncStackTipFromModel(model);
-
-        // Re-sync emergency targets to real model bounds
-        const modelBox = new THREE.Box3().setFromObject(model);
-        const modelSize = modelBox.getSize(new THREE.Vector3());
-        const modelCenter = modelBox.getCenter(new THREE.Vector3());
-        // Scale fire/evac/safe-zone positions proportionally to model footprint
-        const scaleX = modelSize.x / 1920;
-        const scaleZ = modelSize.z / 1920;
-        const refireTargets: FireHotspotState[] = INITIAL_FIRE_HOTSPOTS.map((f) => ({
-          ...f,
-          position: [
-            modelCenter.x + f.position[0] * scaleX,
-            Math.max(2, f.position[1] * Math.min(scaleX, scaleZ)),
-            modelCenter.z + f.position[2] * scaleZ,
-          ] as [number, number, number],
-          truckPos: [
-            modelCenter.x + f.truckPos[0] * scaleX,
-            4,
-            modelCenter.z + f.truckPos[2] * scaleZ,
-          ] as [number, number, number],
-        }));
-        void refireTargets; // positions used by scene objects already built; sync applied via VR system
-
-        setIsLoadingModel(false);
-        setLoadProgress(100);
-      },
-      (evt) => {
-        if (!cancelled && evt.lengthComputable && evt.total > 0) {
-          setLoadProgress(Math.round((evt.loaded / evt.total) * 100));
+          throw new Error(
+            `Файл ${glbSourceUrl} не найден в public/ — загрузите модель кнопкой «Загрузить .GLB».`,
+          );
         }
-      },
-      (err) => {
+
+        setLoadProgress(65);
+        gltfLoader.parse(
+          buffer,
+          "",
+          (gltf) => {
+            if (cancelled) return;
+            const model = gltf.scene;
+
+            // Compute raw bounds; normalize only tiny/giant models to ~1800m human scale
+            const rawBox = new THREE.Box3().setFromObject(model);
+            const rawSize = rawBox.getSize(new THREE.Vector3());
+            const maxHorizontal = Math.max(rawSize.x, rawSize.z, 1);
+            if (maxHorizontal < 250 || maxHorizontal > 5500) {
+              model.scale.multiplyScalar(1800 / maxHorizontal);
+            }
+
+            // Align base strictly to y = 0 and center on X/Z
+            const alignedBox = new THREE.Box3().setFromObject(model);
+            const alignedCenter = alignedBox.getCenter(new THREE.Vector3());
+            model.position.x -= alignedCenter.x;
+            model.position.z -= alignedCenter.z;
+            model.position.y -= alignedBox.min.y;
+
+            model.traverse((child) => {
+              const mesh = child as THREE.Mesh;
+              if (mesh.isMesh) {
+                mesh.castShadow = !isSoftwareGl;
+                mesh.receiveShadow = !isSoftwareGl;
+              }
+            });
+
+            loadedModelRoot = model;
+            modelContainer.add(model);
+            syncStackTipFromModel(model);
+
+            const finalBox = new THREE.Box3().setFromObject(model);
+            syncEmergencyTargetsToModel?.(finalBox);
+
+            setIsLoadingModel(false);
+            setLoadProgress(100);
+          },
+          (parseErr) => {
+            if (cancelled) return;
+            setIsLoadingModel(false);
+            setLoadError(
+              parseErr instanceof Error
+                ? `Ошибка разбора GLB: ${parseErr.message}`
+                : "Не удалось разобрать файл .glb",
+            );
+          },
+        );
+      } catch (err) {
         if (cancelled) return;
         setIsLoadingModel(false);
-        setLoadError(
-          err instanceof Error
-            ? `Ошибка загрузки GLB: ${err.message}`
-            : "Не удалось загрузить файл .glb",
-        );
-      },
-    );
+        setLoadError(err instanceof Error ? err.message : "Не удалось загрузить файл .glb");
+      }
+    };
+    void loadValidatedGlb();
 
     // =========================================================================
     // STAGE 3: 4 Accident / Release Scenario 3D Visuals
@@ -914,13 +979,14 @@ export function NppInspectorModal({
     const mchsGroup = new THREE.Group();
     scene.add(mchsGroup);
 
+    const fireVisuals = new Map<string, FireVisualEntry>();
+    const evacVisuals = new Map<string, EvacVisualEntry>();
+
     // VR Emergency System: player rig, controllers, fire hose, dosimeter, locomotion
     const vrSystem = new VREmergencySystem({
       renderer,
       camera,
       scene,
-      groundPlane: groundPlane,
-      gltfLoader,
       getFires: () =>
         firesRef.current.map((f) => ({
           id: f.id,
@@ -929,12 +995,16 @@ export function NppInspectorModal({
           extinguished: f.extinguished,
         })),
       getEvacs: () =>
-        evacGroupsRef.current.map((g) => ({
-          id: g.id,
-          position: new THREE.Vector3(...g.waypoints[0]),
-          status: g.status,
-        })),
+        evacGroupsRef.current.map((g) => {
+          const vis = evacVisuals.get(g.id);
+          return {
+            id: g.id,
+            position: vis ? vis.squad.position.clone() : new THREE.Vector3(...g.waypoints[0]),
+            status: g.status,
+          };
+        }),
       onExtinguishProgress: (id, delta) => {
+        setActiveExtinguishId(id);
         setFires((prev) =>
           prev.map((f) => {
             if (f.id !== id || f.extinguished) return f;
@@ -954,11 +1024,27 @@ export function NppInspectorModal({
         windDirDeg: windDirRef.current,
         windSpeedMs: windSpeedRef.current,
         stackHeightM: stackHeightRef.current,
+        puffCenterWorld: puffCenterWorld.clone(),
+        puffRadius: puffRadiusWorld,
       }),
+      onModeChange: ({ isInVR, fpMode, statusMsg }) => {
+        const active = isInVR || fpMode;
+        controls.enabled = !active;
+        if (!active) {
+          controls.update();
+        } else {
+          setMchsMode(true);
+        }
+        setVrActive(isInVR);
+        setFpActive(fpMode);
+        setVrStatusMsg(statusMsg ?? null);
+      },
     });
 
     vrControlRef.current = {
-      enterVR: () => vrSystem.enterVR(),
+      enterVR: () => {
+        void vrSystem.enterVR();
+      },
       enableFirstPerson: () => vrSystem.enableFirstPerson(),
       disableFirstPerson: () => vrSystem.disableFirstPerson(),
     };
@@ -979,7 +1065,6 @@ export function NppInspectorModal({
       truck: THREE.Group;
     }
 
-    const fireVisuals = new Map<string, FireVisualEntry>();
     for (const f of INITIAL_FIRE_HOTSPOTS) {
       const fRoot = new THREE.Group();
       fRoot.position.set(...f.position);
@@ -1082,7 +1167,6 @@ export function NppInspectorModal({
       squad: THREE.Group;
     }
 
-    const evacVisuals = new Map<string, EvacVisualEntry>();
     for (const g of INITIAL_EVAC_GROUPS) {
       const pts = g.waypoints.map(([x, y, z]) => new THREE.Vector3(x, y + 2, z));
       const curve = new THREE.CatmullRomCurve3(pts, false, "catmullrom", 0.15);
@@ -1109,6 +1193,86 @@ export function NppInspectorModal({
       evacVisuals.set(g.id, { id: g.id, curve, routeMesh, routeMat, squad });
     }
 
+    syncEmergencyTargetsToModel = (modelBox: THREE.Box3) => {
+      const modelSize = modelBox.getSize(new THREE.Vector3());
+      const modelCenter = modelBox.getCenter(new THREE.Vector3());
+      const scaleX = Math.max(0.15, modelSize.x / 1920);
+      const scaleZ = Math.max(0.15, modelSize.z / 1920);
+      const scaleY = Math.max(0.25, Math.min(scaleX, scaleZ));
+
+      const safePos: [number, number, number] = [
+        modelCenter.x + SAFE_ZONE_POS[0] * scaleX,
+        4,
+        modelCenter.z + SAFE_ZONE_POS[2] * scaleZ,
+      ];
+      safeZoneObj.position.set(...safePos);
+
+      const syncedFires: FireHotspotState[] = INITIAL_FIRE_HOTSPOTS.map((f) => ({
+        ...f,
+        position: [
+          modelCenter.x + f.position[0] * scaleX,
+          Math.max(2, f.position[1] * scaleY),
+          modelCenter.z + f.position[2] * scaleZ,
+        ],
+        truckPos: [
+          modelCenter.x + f.truckPos[0] * scaleX,
+          4,
+          modelCenter.z + f.truckPos[2] * scaleZ,
+        ],
+        progress: 0,
+        extinguished: false,
+      }));
+
+      for (const f of syncedFires) {
+        const vis = fireVisuals.get(f.id);
+        if (!vis) continue;
+        vis.root.position.set(...f.position);
+        vis.truck.position.set(...f.truckPos);
+        vis.truck.lookAt(f.position[0], f.truckPos[1], f.position[2]);
+        vis.truck.rotateY(-Math.PI / 2);
+
+        const pStart = new THREE.Vector3(f.truckPos[0], f.truckPos[1] + 24, f.truckPos[2]);
+        const pEnd = new THREE.Vector3(f.position[0], f.position[1] + 18, f.position[2]);
+        const pMid = pStart.clone().lerp(pEnd, 0.5);
+        pMid.y += 65 * scaleY;
+        const jetCurve = new THREE.QuadraticBezierCurve3(pStart, pMid, pEnd);
+        vis.jetMesh.geometry.dispose();
+        vis.jetMesh.geometry = new THREE.TubeGeometry(jetCurve, 18, 3.2, 8, false);
+      }
+
+      const syncedEvacs: EvacGroupState[] = INITIAL_EVAC_GROUPS.map((g) => ({
+        ...g,
+        waypoints: g.waypoints.map(([wx, , wz], idx) =>
+          idx === g.waypoints.length - 1
+            ? [...safePos]
+            : [modelCenter.x + wx * scaleX, 5, modelCenter.z + wz * scaleZ],
+        ),
+        status: "waiting",
+        progress: 0,
+      }));
+
+      for (const g of syncedEvacs) {
+        const vis = evacVisuals.get(g.id);
+        if (!vis) continue;
+        const pts = g.waypoints.map(([x, y, z]) => new THREE.Vector3(x, y + 2, z));
+        vis.curve = new THREE.CatmullRomCurve3(pts, false, "catmullrom", 0.15);
+        vis.routeMesh.geometry.dispose();
+        vis.routeMesh.geometry = new THREE.TubeGeometry(vis.curve, 48, 4.5, 6, false);
+        vis.squad.position.copy(pts[0]);
+      }
+
+      scaledBaseFiresRef.current = syncedFires.map((f) => ({ ...f }));
+      scaledBaseEvacsRef.current = syncedEvacs.map((g) => ({
+        ...g,
+        waypoints: g.waypoints.map((w) => [...w] as [number, number, number]),
+      }));
+      setFires(syncedFires);
+      setEvacGroups(syncedEvacs);
+
+      // Position VR/FP spawn cleanly outside the outer perimeter facing the plant
+      vrSystem.setSpawnPosition(modelCenter.x, modelBox.max.z + 120);
+    };
+
     // Raycaster interaction for MCHS mode (hover + click/hold)
     let holdExtinguishTimer: number | null = null;
     let lastHoverTs = 0;
@@ -1126,6 +1290,7 @@ export function NppInspectorModal({
     };
 
     const onCanvasPointerMove = (e: PointerEvent) => {
+      if (vrSystem.isActive()) return;
       const now = performance.now();
       if (now - lastHoverTs < 55) return;
       lastHoverTs = now;
@@ -1139,11 +1304,14 @@ export function NppInspectorModal({
         window.clearInterval(holdExtinguishTimer);
         holdExtinguishTimer = null;
       }
-      controls.enabled = true;
+      if (!vrSystem.isActive()) {
+        controls.enabled = true;
+      }
       setActiveExtinguishId(null);
     };
 
     const onCanvasPointerDown = (e: PointerEvent) => {
+      if (vrSystem.isActive()) return;
       if (e.button !== 0 || !mchsModeRef.current) return;
       const hit = getHitTarget(e.clientX, e.clientY);
       if (!hit) return;
@@ -1183,6 +1351,9 @@ export function NppInspectorModal({
     let puffCycleTime = 0;
     cameraActionRef.current = {
       setPreset: (preset) => {
+        if (vrSystem.isActive()) {
+          vrSystem.disableFirstPerson();
+        }
         if (preset === "iso") {
           camTransition = {
             pos: new THREE.Vector3(-1450, 1180, 1550),
@@ -1226,10 +1397,11 @@ export function NppInspectorModal({
     });
     resizeObserver.observe(container);
 
-    // Animation Loop
+    // Animation Loop (supports both WebXR setAnimationLoop and Software-GL fallback pacing)
     let frameId = 0;
     let lastTime = performance.now();
     let lastEvacUiSync = 0;
+    let lastTelemetrySync = 0;
 
     function afterDraw(cb: () => void) {
       const gl = renderer.getContext() as WebGL2RenderingContext;
@@ -1253,53 +1425,57 @@ export function NppInspectorModal({
       const dt = Math.min(0.08, Math.max(0.001, (now - lastTime) / 1000));
       lastTime = now;
 
-      // Smooth damped camera reset/preset
-      if (camTransition) {
-        const lambda = 7.5;
-        camera.position.x = THREE.MathUtils.damp(
-          camera.position.x,
-          camTransition.pos.x,
-          lambda,
-          dt,
-        );
-        camera.position.y = THREE.MathUtils.damp(
-          camera.position.y,
-          camTransition.pos.y,
-          lambda,
-          dt,
-        );
-        camera.position.z = THREE.MathUtils.damp(
-          camera.position.z,
-          camTransition.pos.z,
-          lambda,
-          dt,
-        );
-        controls.target.x = THREE.MathUtils.damp(
-          controls.target.x,
-          camTransition.target.x,
-          lambda,
-          dt,
-        );
-        controls.target.y = THREE.MathUtils.damp(
-          controls.target.y,
-          camTransition.target.y,
-          lambda,
-          dt,
-        );
-        controls.target.z = THREE.MathUtils.damp(
-          controls.target.z,
-          camTransition.target.z,
-          lambda,
-          dt,
-        );
-        if (
-          camera.position.distanceTo(camTransition.pos) < 3 &&
-          controls.target.distanceTo(camTransition.target) < 3
-        ) {
-          camTransition = null;
+      // Smooth damped camera reset/preset (only when OrbitControls is active)
+      if (!vrSystem.isActive()) {
+        if (camTransition) {
+          const lambda = 7.5;
+          camera.position.x = THREE.MathUtils.damp(
+            camera.position.x,
+            camTransition.pos.x,
+            lambda,
+            dt,
+          );
+          camera.position.y = THREE.MathUtils.damp(
+            camera.position.y,
+            camTransition.pos.y,
+            lambda,
+            dt,
+          );
+          camera.position.z = THREE.MathUtils.damp(
+            camera.position.z,
+            camTransition.pos.z,
+            lambda,
+            dt,
+          );
+          controls.target.x = THREE.MathUtils.damp(
+            controls.target.x,
+            camTransition.target.x,
+            lambda,
+            dt,
+          );
+          controls.target.y = THREE.MathUtils.damp(
+            controls.target.y,
+            camTransition.target.y,
+            lambda,
+            dt,
+          );
+          controls.target.z = THREE.MathUtils.damp(
+            controls.target.z,
+            camTransition.target.z,
+            lambda,
+            dt,
+          );
+          if (
+            camera.position.distanceTo(camTransition.pos) < 3 &&
+            controls.target.distanceTo(camTransition.target) < 3
+          ) {
+            camTransition = null;
+          }
         }
+        controls.update();
+      } else {
+        camTransition = null;
       }
-      controls.update();
 
       // Rotate wind arrow & align plume vector
       const mode = scenarioRef.current;
@@ -1360,6 +1536,9 @@ export function NppInspectorModal({
         const centerX = stackTipWorld.x + wx * puffDist;
         const centerY = stackTipWorld.y + 18 + Math.sin(puffT * 0.6) * 22;
         const centerZ = stackTipWorld.z + wz * puffDist;
+
+        puffCenterWorld.set(centerX, centerY, centerZ);
+        puffRadiusWorld = puffRadius;
 
         puffCloudGroup.position.set(centerX, centerY, centerZ);
         puffCloudGroup.scale.set(puffRadius * 1.15, puffRadius * 0.82, puffRadius * 1.15);
@@ -1531,15 +1710,29 @@ export function NppInspectorModal({
       // Update VR emergency system (locomotion, hose, dosimeter, evac)
       if (vrSystem.isActive()) {
         vrSystem.update();
+        if (now - lastTelemetrySync > 180) {
+          lastTelemetrySync = now;
+          setVrTelemetry(vrSystem.getTelemetry());
+        }
       }
 
       renderer.render(scene, camera);
-      if (isSoftwareGl) afterDraw(tick);
-      else frameId = requestAnimationFrame(tick);
+      if (isSoftwareGl && !renderer.xr.isPresenting) {
+        afterDraw(tick);
+      }
     };
 
-    if (isSoftwareGl) tick();
-    else frameId = requestAnimationFrame(tick);
+    const onXrStartLoop = () => {
+      clearTimeout(frameId);
+      renderer.setAnimationLoop(tick);
+    };
+    renderer.xr.addEventListener("sessionstart", onXrStartLoop);
+
+    if (isSoftwareGl) {
+      tick();
+    } else {
+      renderer.setAnimationLoop(tick);
+    }
 
     return () => {
       cancelled = true;
@@ -1548,15 +1741,20 @@ export function NppInspectorModal({
         window.clearTimeout(burstClearTimerRef.current);
         burstClearTimerRef.current = null;
       }
+      renderer.setAnimationLoop(null);
+      renderer.xr.removeEventListener("sessionstart", onXrStartLoop);
       window.removeEventListener("pointerup", stopHoldExtinguish);
       canvas.removeEventListener("webglcontextlost", onWebglContextLost);
       canvas.removeEventListener("pointermove", onCanvasPointerMove);
       canvas.removeEventListener("pointerdown", onCanvasPointerDown);
       controls.removeEventListener("start", onControlsStart);
-      cancelAnimationFrame(frameId);
       clearTimeout(frameId);
       resizeObserver.disconnect();
       cameraActionRef.current = null;
+      vrControlRef.current = null;
+      setVrActive(false);
+      setFpActive(false);
+      setVrStatusMsg(null);
 
       if (loadedModelRoot) {
         loadedModelRoot.traverse((obj) => {
@@ -1568,6 +1766,14 @@ export function NppInspectorModal({
           }
         });
       }
+      mchsGroup.traverse((obj) => {
+        const m = obj as THREE.Mesh;
+        m.geometry?.dispose();
+        if (m.material) {
+          const mats = Array.isArray(m.material) ? m.material : [m.material];
+          mats.forEach((mat) => mat.dispose());
+        }
+      });
       groundTex.dispose();
       groundMat.dispose();
       groundPlane.geometry.dispose();
@@ -1588,9 +1794,6 @@ export function NppInspectorModal({
       renderer.dispose();
     };
   }, [isOpen, glbSourceUrl, handleDispatchEvacGroup, handleExtinguishBurst]);
-
-  const [vrActive, setVrActive] = useState(false);
-  const [fpActive, setFpActive] = useState(false);
 
   const extinguishedCount = useMemo(() => fires.filter((f) => f.extinguished).length, [fires]);
   const evacuatedCount = useMemo(
@@ -1654,25 +1857,25 @@ export function NppInspectorModal({
                 onClick={handleResetToDefaultGlb}
                 className="px-2.5 py-1.5 rounded-md border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-xs text-slate-300 whitespace-nowrap shrink-0 transition-colors"
               >
-                Сброс к npp.glb
+                Сброс к assembly.glb
               </button>
             )}
 
             <button
               type="button"
               onClick={() => {
-                setFpActive((v) => {
-                  const next = !v;
-                  setVrActive(false);
-                  return next;
-                });
+                if (fpActive) {
+                  vrControlRef.current?.disableFirstPerson();
+                } else {
+                  vrControlRef.current?.enableFirstPerson();
+                }
               }}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-xs font-semibold whitespace-nowrap shrink-0 transition-colors ${
                 fpActive
                   ? "border-cyan-500/80 bg-cyan-600 text-white"
                   : "border-cyan-500/50 bg-cyan-500/15 text-cyan-300 hover:bg-cyan-500/25"
               }`}
-              title="Режим от первого лица (WASD + мышь)"
+              title="Режим от первого лица (WASD + мышь + Пробел/ЛКМ + E)"
             >
               <Users className="w-3.5 h-3.5" />
               {fpActive ? "1-е лицо: Вкл" : "1-е лицо"}
@@ -1680,17 +1883,16 @@ export function NppInspectorModal({
 
             <button
               type="button"
-              onClick={() => setVrActive((v) => !v)}
+              onClick={() => vrControlRef.current?.enterVR()}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-xs font-semibold whitespace-nowrap shrink-0 transition-colors ${
                 vrActive
                   ? "border-violet-500/80 bg-violet-600 text-white"
                   : "border-violet-500/50 bg-violet-500/15 text-violet-300 hover:bg-violet-500/25"
-              }`
-            }
-            title="Войти в VR (требуется WebXR-шлем)"
+              }`}
+              title="Войти в WebXR VR-режим (или 1-е лицо при отсутствии шлема)"
             >
               <ShieldAlert className="w-3.5 h-3.5" />
-              {vrActive ? "VR: Вкл" : "Войти в VR"}
+              {vrActive ? "Выйти из VR" : "Войти в VR"}
             </button>
 
             <button
@@ -1741,14 +1943,36 @@ export function NppInspectorModal({
           <div ref={mountRef} className="w-full h-full" />
 
           {(vrActive || fpActive) && (
-            <div className="absolute bottom-20 left-3 px-3 py-2 rounded-lg border border-cyan-500/50 bg-[#0f172a]/95 text-[11px] text-cyan-200 space-y-0.5 pointer-events-none">
-              <div className="font-semibold text-cyan-300">
-                {vrActive ? "VR-режим МЧС" : "Режим от первого лица"}
+            <div className="absolute bottom-20 left-3 max-w-xs px-3 py-2 rounded-lg border border-cyan-500/50 bg-[#0f172a]/95 text-[11px] text-cyan-200 space-y-1 pointer-events-none">
+              <div className="flex items-center justify-between gap-3">
+                <span className="font-semibold text-cyan-300">
+                  {vrActive ? "VR-режим МЧС (WebXR)" : "Режим от первого лица"}
+                </span>
+                <span
+                  className={`font-mono font-bold tabular-nums ${
+                    vrTelemetry.hazardLevel === "danger"
+                      ? "text-red-400"
+                      : vrTelemetry.hazardLevel === "elevated"
+                        ? "text-amber-300"
+                        : "text-emerald-300"
+                  }`}
+                >
+                  {vrTelemetry.doseRate < 1000
+                    ? `${vrTelemetry.doseRate.toFixed(1)} мкЗв/ч`
+                    : `${(vrTelemetry.doseRate / 1000).toFixed(2)} мЗв/ч`}
+                </span>
               </div>
-              <div>WASD: движение · Мышь: обзор · Пробел/E: огнетушитель</div>
-              <div>Подойдите к группе людей для эвакуации</div>
+              <div className="text-[10px] text-slate-300 font-mono tabular-nums">
+                Накопл. доза: {vrTelemetry.accumulatedDose.toFixed(4)} мЗв · ДКС-96
+              </div>
+              {vrActive ? (
+                <div>Стик Л: шаг · Стик П: поворот 30° · Курок П: ствол · Л: телепорт</div>
+              ) : (
+                <div>Клик по сцене: обзор · WASD+Shift: шаг · Пробел/F/ЛКМ: ствол · E: эвак.</div>
+              )}
+              {vrStatusMsg && <div className="text-amber-300">{vrStatusMsg}</div>}
             </div>
-          )>
+          )}
 
           {/* Loading / Error State Overlay (never uses backdrop-blur over WebGL) */}
           {isLoadingModel && (
