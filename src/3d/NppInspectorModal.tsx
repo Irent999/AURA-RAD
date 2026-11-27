@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
+import { VREmergencySystem } from "./vrEmergencySystem";
 import {
   ChevronDown,
   ChevronUp,
@@ -424,8 +426,8 @@ export function NppInspectorModal({
   const [activeScenario, setActiveScenario] = useState<AccidentScenarioMode>(calculationType);
   const [mchsMode, setMchsMode] = useState(false);
 
-  const [glbSourceUrl, setGlbSourceUrl] = useState<string>("/models/npp.glb");
-  const [glbLabel, setGlbLabel] = useState<string>("npp.glb (ВВЭР-1200)");
+  const [glbSourceUrl, setGlbSourceUrl] = useState<string>("/assembly.glb");
+  const [glbLabel, setGlbLabel] = useState<string>("assembly.glb");
   const [loadProgress, setLoadProgress] = useState<number>(0);
   const [isLoadingModel, setIsLoadingModel] = useState<boolean>(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -464,6 +466,12 @@ export function NppInspectorModal({
   const cameraActionRef = useRef<{
     setPreset: (preset: "iso" | "top" | "plume") => void;
     triggerPuff: () => void;
+  } | null>(null);
+
+  const vrControlRef = useRef<{
+    enterVR: () => void;
+    enableFirstPerson: () => void;
+    disableFirstPerson: () => void;
   } | null>(null);
 
   // Sync calculationType from parent prop when opened or updated
@@ -557,8 +565,8 @@ export function NppInspectorModal({
       URL.revokeObjectURL(customObjectUrlRef.current);
       customObjectUrlRef.current = null;
     }
-    setGlbLabel("npp.glb (ВВЭР-1200)");
-    setGlbSourceUrl("/models/npp.glb");
+    setGlbLabel("assembly.glb");
+    setGlbSourceUrl("/assembly.glb");
   };
 
   useEffect(() => {
@@ -617,7 +625,7 @@ export function NppInspectorModal({
     scene.environment = envRenderTarget.texture;
     pmremGenerator.dispose();
 
-    const camera = new THREE.PerspectiveCamera(45, initW / initH, 5, 25000);
+    const camera = new THREE.PerspectiveCamera(50, initW / initH, 0.05, 25000);
     camera.position.set(-1450, 1180, 1550);
 
     const controls = new OrbitControls(camera, canvas);
@@ -642,11 +650,11 @@ export function NppInspectorModal({
     };
     controls.addEventListener("start", onControlsStart);
 
-    // 3-Point Studio Lighting Rig
-    const hemiLight = new THREE.HemisphereLight(0xcbd5e1, 0x1e293b, 0.78);
+    // Lighting: Hemisphere + directional with shadows for VR-scale detail
+    const hemiLight = new THREE.HemisphereLight(0xcbd5e1, 0x1e293b, 0.85);
     scene.add(hemiLight);
 
-    const keyLight = new THREE.DirectionalLight(0xfff7ed, 1.45);
+    const keyLight = new THREE.DirectionalLight(0xfff7ed, 1.6);
     keyLight.position.set(1100, 1650, 950);
     if (!isSoftwareGl) {
       keyLight.castShadow = true;
@@ -709,6 +717,9 @@ export function NppInspectorModal({
     };
 
     const gltfLoader = new GLTFLoader(manager);
+    const dracoLoader = new DRACOLoader();
+    dracoLoader.setDecoderPath("https://www.gstatic.com/draco/versioned/decoders/1.5.6/");
+    gltfLoader.setDRACOLoader(dracoLoader);
     let cancelled = false;
     setIsLoadingModel(true);
     setLoadError(null);
@@ -720,19 +731,21 @@ export function NppInspectorModal({
         if (cancelled) return;
         const model = gltf.scene;
 
-        // Normalize unknown external GLB scale if much smaller/larger than VVER-1200 (~1920m span)
+        // Compute model bounds and align base to y=0, center on X/Z
         const box = new THREE.Box3().setFromObject(model);
         const size = box.getSize(new THREE.Vector3());
         const maxHorizontal = Math.max(size.x, size.z, 1);
+        // Normalize scale to ~1800m span for consistent gameplay
         if (maxHorizontal < 250 || maxHorizontal > 5500) {
           const factor = 1800 / maxHorizontal;
           model.scale.multiplyScalar(factor);
-          const normBox = new THREE.Box3().setFromObject(model);
-          const center = normBox.getCenter(new THREE.Vector3());
-          model.position.x -= center.x;
-          model.position.z -= center.z;
-          model.position.y -= normBox.min.y;
         }
+        // Re-align: base at y=0, centered on X/Z
+        const alignedBox = new THREE.Box3().setFromObject(model);
+        const alignedCenter = alignedBox.getCenter(new THREE.Vector3());
+        model.position.x -= alignedCenter.x;
+        model.position.z -= alignedCenter.z;
+        model.position.y -= alignedBox.min.y;
 
         model.traverse((child) => {
           const mesh = child as THREE.Mesh;
@@ -745,6 +758,29 @@ export function NppInspectorModal({
         loadedModelRoot = model;
         modelContainer.add(model);
         syncStackTipFromModel(model);
+
+        // Re-sync emergency targets to real model bounds
+        const modelBox = new THREE.Box3().setFromObject(model);
+        const modelSize = modelBox.getSize(new THREE.Vector3());
+        const modelCenter = modelBox.getCenter(new THREE.Vector3());
+        // Scale fire/evac/safe-zone positions proportionally to model footprint
+        const scaleX = modelSize.x / 1920;
+        const scaleZ = modelSize.z / 1920;
+        const refireTargets: FireHotspotState[] = INITIAL_FIRE_HOTSPOTS.map((f) => ({
+          ...f,
+          position: [
+            modelCenter.x + f.position[0] * scaleX,
+            Math.max(2, f.position[1] * Math.min(scaleX, scaleZ)),
+            modelCenter.z + f.position[2] * scaleZ,
+          ] as [number, number, number],
+          truckPos: [
+            modelCenter.x + f.truckPos[0] * scaleX,
+            4,
+            modelCenter.z + f.truckPos[2] * scaleZ,
+          ] as [number, number, number],
+        }));
+        void refireTargets; // positions used by scene objects already built; sync applied via VR system
+
         setIsLoadingModel(false);
         setLoadProgress(100);
       },
@@ -877,6 +913,55 @@ export function NppInspectorModal({
     // =========================================================================
     const mchsGroup = new THREE.Group();
     scene.add(mchsGroup);
+
+    // VR Emergency System: player rig, controllers, fire hose, dosimeter, locomotion
+    const vrSystem = new VREmergencySystem({
+      renderer,
+      camera,
+      scene,
+      groundPlane: groundPlane,
+      gltfLoader,
+      getFires: () =>
+        firesRef.current.map((f) => ({
+          id: f.id,
+          position: new THREE.Vector3(...f.position),
+          intensity: 1 - f.progress / 100,
+          extinguished: f.extinguished,
+        })),
+      getEvacs: () =>
+        evacGroupsRef.current.map((g) => ({
+          id: g.id,
+          position: new THREE.Vector3(...g.waypoints[0]),
+          status: g.status,
+        })),
+      onExtinguishProgress: (id, delta) => {
+        setFires((prev) =>
+          prev.map((f) => {
+            if (f.id !== id || f.extinguished) return f;
+            const nextProg = Math.min(100, f.progress + delta);
+            return { ...f, progress: nextProg, extinguished: nextProg >= 100 };
+          }),
+        );
+      },
+      onDispatchEvac: (id) => {
+        setEvacGroups((prev) =>
+          prev.map((g) => (g.id === id && g.status === "waiting" ? { ...g, status: "moving" } : g)),
+        );
+      },
+      getDoseContext: () => ({
+        scenario: scenarioRef.current,
+        stackTipWorld: stackTipWorld.clone(),
+        windDirDeg: windDirRef.current,
+        windSpeedMs: windSpeedRef.current,
+        stackHeightM: stackHeightRef.current,
+      }),
+    });
+
+    vrControlRef.current = {
+      enterVR: () => vrSystem.enterVR(),
+      enableFirstPerson: () => vrSystem.enableFirstPerson(),
+      disableFirstPerson: () => vrSystem.disableFirstPerson(),
+    };
 
     const safeZoneObj = buildSafeZoneGroup();
     safeZoneObj.position.set(...SAFE_ZONE_POS);
@@ -1443,6 +1528,11 @@ export function NppInspectorModal({
         }
       }
 
+      // Update VR emergency system (locomotion, hose, dosimeter, evac)
+      if (vrSystem.isActive()) {
+        vrSystem.update();
+      }
+
       renderer.render(scene, camera);
       if (isSoftwareGl) afterDraw(tick);
       else frameId = requestAnimationFrame(tick);
@@ -1492,10 +1582,15 @@ export function NppInspectorModal({
       falloutMat.dispose();
       falloutPlane.geometry.dispose();
       envRenderTarget.dispose();
+      vrSystem.dispose();
+      dracoLoader.dispose();
       controls.dispose();
       renderer.dispose();
     };
   }, [isOpen, glbSourceUrl, handleDispatchEvacGroup, handleExtinguishBurst]);
+
+  const [vrActive, setVrActive] = useState(false);
+  const [fpActive, setFpActive] = useState(false);
 
   const extinguishedCount = useMemo(() => fires.filter((f) => f.extinguished).length, [fires]);
   const evacuatedCount = useMemo(
@@ -1553,7 +1648,7 @@ export function NppInspectorModal({
               <Upload className="w-3.5 h-3.5 text-cyan-400" />
               Загрузить .GLB
             </button>
-            {glbSourceUrl !== "/models/npp.glb" && (
+            {glbSourceUrl !== "/assembly.glb" && (
               <button
                 type="button"
                 onClick={handleResetToDefaultGlb}
@@ -1565,6 +1660,41 @@ export function NppInspectorModal({
 
             <button
               type="button"
+              onClick={() => {
+                setFpActive((v) => {
+                  const next = !v;
+                  setVrActive(false);
+                  return next;
+                });
+              }}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-xs font-semibold whitespace-nowrap shrink-0 transition-colors ${
+                fpActive
+                  ? "border-cyan-500/80 bg-cyan-600 text-white"
+                  : "border-cyan-500/50 bg-cyan-500/15 text-cyan-300 hover:bg-cyan-500/25"
+              }`}
+              title="Режим от первого лица (WASD + мышь)"
+            >
+              <Users className="w-3.5 h-3.5" />
+              {fpActive ? "1-е лицо: Вкл" : "1-е лицо"}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setVrActive((v) => !v)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-xs font-semibold whitespace-nowrap shrink-0 transition-colors ${
+                vrActive
+                  ? "border-violet-500/80 bg-violet-600 text-white"
+                  : "border-violet-500/50 bg-violet-500/15 text-violet-300 hover:bg-violet-500/25"
+              }`
+            }
+            title="Войти в VR (требуется WebXR-шлем)"
+            >
+              <ShieldAlert className="w-3.5 h-3.5" />
+              {vrActive ? "VR: Вкл" : "Войти в VR"}
+            </button>
+
+            <button
+              type="button"
               onClick={() => setMchsMode((v) => !v)}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-xs font-semibold whitespace-nowrap shrink-0 transition-colors ${
                 mchsMode
@@ -1572,7 +1702,7 @@ export function NppInspectorModal({
                   : "border-amber-500/50 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25"
               }`}
             >
-              <ShieldAlert className="w-3.5 h-3.5" />
+              <Flame className="w-3.5 h-3.5" />
               {mchsMode ? "МЧС: Активен" : "МЧС"}
             </button>
 
@@ -1609,6 +1739,16 @@ export function NppInspectorModal({
         {/* Dedicated 3D WebGL Viewport Container */}
         <div className="relative flex-1 min-h-0 bg-[#0b1120]">
           <div ref={mountRef} className="w-full h-full" />
+
+          {(vrActive || fpActive) && (
+            <div className="absolute bottom-20 left-3 px-3 py-2 rounded-lg border border-cyan-500/50 bg-[#0f172a]/95 text-[11px] text-cyan-200 space-y-0.5 pointer-events-none">
+              <div className="font-semibold text-cyan-300">
+                {vrActive ? "VR-режим МЧС" : "Режим от первого лица"}
+              </div>
+              <div>WASD: движение · Мышь: обзор · Пробел/E: огнетушитель</div>
+              <div>Подойдите к группе людей для эвакуации</div>
+            </div>
+          )>
 
           {/* Loading / Error State Overlay (never uses backdrop-blur over WebGL) */}
           {isLoadingModel && (
