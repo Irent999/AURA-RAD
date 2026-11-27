@@ -34,3 +34,4 @@ dist-ssr
 release/
 dist/
 node_modules/
+.env
